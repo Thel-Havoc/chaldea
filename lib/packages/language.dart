@@ -61,7 +61,14 @@ class Language {
     return supportLanguages.firstWhereOrNull((lang) => code?.startsWith(lang.code) ?? false);
   }
 
-  static Locale get systemLocale => WidgetsBinding.instance.platformDispatcher.locale;
+  static Locale get systemLocale {
+    try {
+      return WidgetsBinding.instance.platformDispatcher.locale;
+    } catch (_) {
+      // Not available in background isolates — fall back to English.
+      return const Locale('en');
+    }
+  }
 
   /// used for 5 region game data
   static bool get isZH => isCHS || isCHT;

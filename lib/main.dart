@@ -6,11 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:catcher_2/catcher_2.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'package:chaldea/app/tools/app_window.dart';
 import 'package:chaldea/packages/home_widget.dart';
-import 'app/chaldea.dart';
 import 'app/modules/common/blank_page.dart';
+import 'app/ui/optimizer_app.dart';
 import 'app/modules/home/bootstrap/startup_failed_page.dart';
 import 'models/db.dart';
 import 'packages/analysis/analysis.dart';
@@ -20,6 +21,7 @@ import 'packages/split_route/split_route.dart';
 import 'utils/catcher/catcher_util.dart';
 import 'utils/catcher/server_feedback_handler.dart';
 import 'utils/http_override.dart';
+import 'generated/l10n.dart';
 import 'utils/notification.dart';
 import 'utils/utils.dart';
 
@@ -30,7 +32,19 @@ void main() async {
   Catcher2Options? catcherOptions;
   try {
     await _initiateCommon();
+    // Optimizer: always use the standard AppData path on Windows so we find
+    // Chaldea's downloaded game data regardless of where the exe lives.
+    // (Chaldea's default release-mode logic points to a 'userdata' folder
+    // next to the exe, which is inside the build tree during development.)
+    if (PlatformU.isWindows) {
+      final appSupport = await getApplicationSupportDirectory();
+      await db.paths.initRootPath(testAppPath: appSupport.path);
+    }
     await db.initiate();
+    // Localization must be initialized before any battle simulation runs.
+    // S.current is used inside battle functions (e.g. AddState.shouldAddState)
+    // and crashes with a null check error if no locale has been loaded yet.
+    await S.load(const Locale('en'));
     AppAnalysis.instance.initiate();
     catcherOptions = CatcherUtil.getOptions(
       logPath: db.paths.crashLog,
@@ -54,7 +68,7 @@ void main() async {
       print(s);
     }
   }
-  final app = initError == null ? Chaldea() : StartupFailedPage(error: initError, stackTrace: initStack, wrapApp: true);
+  final app = initError == null ? const OptimizerApp() : StartupFailedPage(error: initError, stackTrace: initStack, wrapApp: true);
   if (kDebugMode) {
     runApp(app);
   } else {

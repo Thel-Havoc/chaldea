@@ -212,7 +212,11 @@ class LocalSettings {
 
   bool get isResolvedDarkMode {
     if (themeMode == ThemeMode.system) {
-      return WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
+      try {
+        return WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
+      } catch (_) {
+        return false;
+      }
     }
     return themeMode == ThemeMode.dark;
   }

@@ -36,13 +36,20 @@ final kTextButtonDenseStyle = TextButton.styleFrom(
   visualDensity: VisualDensity.compact,
 );
 
-bool get isBuildingWidget =>
-    const [
-      SchedulerPhase.transientCallbacks,
-      SchedulerPhase.midFrameMicrotasks,
-      SchedulerPhase.persistentCallbacks,
-    ].contains(WidgetsBinding.instance.schedulerPhase) ||
-    WidgetsBinding.instance.rootElement == null;
+bool get isBuildingWidget {
+  try {
+    final binding = WidgetsBinding.instance;
+    return const [
+          SchedulerPhase.transientCallbacks,
+          SchedulerPhase.midFrameMicrotasks,
+          SchedulerPhase.persistentCallbacks,
+        ].contains(binding.schedulerPhase) ||
+        binding.rootElement == null;
+  } catch (_) {
+    // Not available in background isolates.
+    return false;
+  }
+}
 
 extension ScrollPositionX on ScrollMetrics {
   double guessPixelsAt(int index, int total) {

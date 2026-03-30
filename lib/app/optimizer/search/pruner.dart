@@ -58,11 +58,22 @@ class Pruner {
   final QuestPhase quest;
   final UserRoster roster;
 
-  const Pruner({required this.quest, required this.roster});
+  int gate1Blocked = 0;
+  int gate2Blocked = 0;
+
+  Pruner({required this.quest, required this.roster});
 
   /// Returns true if [candidate] passes both gates and should be simulated.
   bool passes(CandidateTeam candidate) {
-    return _passesGate1(candidate) && _passesGate2(candidate);
+    if (!_passesGate1(candidate)) {
+      gate1Blocked++;
+      return false;
+    }
+    if (!_passesGate2(candidate)) {
+      gate2Blocked++;
+      return false;
+    }
+    return true;
   }
 
   // =========================================================================
@@ -88,11 +99,14 @@ class Pruner {
     // MC NP charge.
     final mcCharge = _mcNpCharge(candidate.mysticCodeId, candidate.mysticCodeLevel);
 
-    // For each potential attacker, check if they can reach 100% NP.
+    // For each player servant tagged as an attacker, check if they can reach 100% NP.
+    // Borrowed supports (not in roster.servants) are never assigned NP turns.
     for (int i = 0; i < svtIds.length; i++) {
       final svtId = svtIds[i];
       final svt = db.gameData.servantsById[svtId];
-      if (svt == null || !_isAttacker(svt)) continue;
+      if (svt == null) continue;
+      final owned = roster.servants[svtId];
+      if (owned == null || !owned.roles.contains(ServantRole.attacker)) continue;
 
       final ceCharge = _ceNpCharge(ceIds[i]);
       final appendCharge = _append2Charge(svtId, svt);
@@ -126,9 +140,31 @@ class Pruner {
       for (int i = 0; i < svtIds.length; i++) {
         final svtId = svtIds[i];
         final svt = db.gameData.servantsById[svtId];
-        if (svt == null || !_isAttacker(svt)) continue;
+        if (svt == null) continue;
+        // Only consider servants the player tagged as attackers.
+        // Borrowed supports (not in roster.servants) are never NP-firers.
+        final owned = roster.servants[svtId];
+        if (owned == null || !owned.roles.contains(ServantRole.attacker)) continue;
 
-        final td = svt.groupedNoblePhantasms[1]?.firstOrNull;
+        // Check all NP variants for this servant: form-change servants like
+        // Mélusine have both ST and AoE NPs — we want to use the best one
+        // for each wave. firstOrNull would misidentify her as ST-only and
+        // incorrectly prune multi-enemy waves.
+        final nps = svt.groupedNoblePhantasms[1] ?? [];
+        if (nps.isEmpty) continue;
+
+        // For multi-enemy waves, prefer an AoE NP variant if one exists.
+        final preferAoe = stage.enemies.length > 1;
+        NiceTd? td;
+        for (final np in nps) {
+          if (np.functions.any((f) => f.funcType.isDamageNp)) {
+            final aoe = np.functions.any((f) =>
+                f.funcTargetType == FuncTargetType.enemyAll ||
+                f.funcTargetType == FuncTargetType.enemyFull);
+            if (td == null || (preferAoe && aoe)) td = np;
+            if (preferAoe && aoe) break;
+          }
+        }
         if (td == null) continue;
 
         final damageFunc =
@@ -154,7 +190,7 @@ class Pruner {
         final classAtkRate =
             db.gameData.constData.classInfo[svt.classId]?.attackRate ?? 1000;
 
-        // Single-target NPs cannot clear multi-enemy waves — skip them.
+        // Single-target NPs cannot clear multi-enemy waves.
         final isAoe = damageFunc.funcTargetType == FuncTargetType.enemyAll ||
             damageFunc.funcTargetType == FuncTargetType.enemyFull;
         if (stage.enemies.length > 1 && !isAoe) continue;
@@ -410,12 +446,6 @@ class Pruner {
     return const [10, 10, 10]; // support: assume max skills
   }
 
-  /// True if this servant has a damageNp-type Noble Phantasm.
-  bool _isAttacker(Servant svt) {
-    final td = svt.groupedNoblePhantasms[1]?.firstOrNull;
-    if (td == null) return false;
-    return td.functions.any((f) => f.funcType.isDamageNp);
-  }
 
   /// True if the function targets allies (self, one ally, party-wide, etc.).
   /// Used to skip enemy-targeting effects when counting buffs.

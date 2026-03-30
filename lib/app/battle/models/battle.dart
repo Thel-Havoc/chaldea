@@ -156,6 +156,11 @@ class BattleData {
 
   double criticalStars = 0;
   int _uniqueIndex = 1;
+
+  /// Exposes [_uniqueIndex] so [HeadlessRunner] can capture and restore it
+  /// between specs of the same candidate.
+  int get uniqueIndex => _uniqueIndex;
+
   int _addOrder = 1;
   int cardDealt = 0;
   Set<int> currentCards = {};
@@ -265,6 +270,32 @@ class BattleData {
   }
 
   bool get isBattleFinished => nonnullEnemies.isEmpty || nonnullPlayers.isEmpty;
+
+  /// Resets all fields that [init] does not reset, so this instance can be
+  /// reused for a new simulation without allocating a new [BattleData].
+  ///
+  /// Call this before each [init] when running multiple specs on the same
+  /// [HeadlessRunner]. Reusing a single instance per worker eliminates the
+  /// ~40 KB per-spec allocation from the old generation, which prevents the
+  /// Dart GC from reaching a stop-the-world safepoint and stalling the root
+  /// isolate for the duration of the run.
+  void resetForReuse() {
+    _addOrder = 1;
+    isFirstSkillInTurn = true;
+    isPlayerTurn = true;
+    cardDealt = 0;
+    currentCards.clear();
+    remainingCards.clear();
+    curFunc = null;
+    snapshots.clear();
+    recorder = BattleRecordManager();
+    replayDataRecord = BattleReplayDelegateData();
+    battleLogger.logs.clear();
+    deadAttackCommandDict.clear();
+    checkDuplicateFuncData.clear();
+    fieldAi = FieldAiManager();
+    options = BattleOptionsRuntime();
+  }
 
   Future<void> init(
     final QuestPhase quest,

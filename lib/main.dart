@@ -24,8 +24,14 @@ import 'utils/http_override.dart';
 import 'generated/l10n.dart';
 import 'utils/notification.dart';
 import 'utils/utils.dart';
+import 'app/optimizer/simulation/headless_worker.dart' show runWorkerProcess;
 
-void main() async {
+void main(List<String> args) async {
+  // Subprocess worker mode: headless optimizer worker, no UI.
+  if (args.contains('--worker')) {
+    await runWorkerProcess(args);
+    return;
+  }
   // make sure flutter packages like path_provider is working now
   WidgetsFlutterBinding.ensureInitialized();
   dynamic initError, initStack;

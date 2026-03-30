@@ -3,12 +3,20 @@
 /// Emits [CandidateTeam]s in smart order (most-promising first) so that
 /// the pruner and simulator can find good solutions fast and prune the rest.
 ///
-/// The outer loop structure (from the design doc):
+/// Team size is determined dynamically:
+///   Always:    2 player frontline slots + 1 borrowed support = 3 frontline total
+///   +1 backline if the MC has Order Change (the swap-in servant)
+///   +1 backline per frontline servant that has a field-departure skill or NP
+///              (e.g. Arash self-death, Chen Gong ally sacrifice)
+///
+/// The outer loop structure:
 ///   For each support choice:
 ///     For each MC choice:
-///       For each 5-servant combo from player roster:
-///         For each CE assignment:
-///           emit → Pruner → Simulator
+///       For each 2-servant frontline combo from player roster:
+///         Determine backline size (OC + field-departure count)
+///         For each backline combo from remaining roster:
+///           For each CE assignment:
+///             emit → Pruner → Simulator
 ///
 /// This file owns only the generation and ordering logic. It knows nothing
 /// about simulation or game mechanics — those live in pruner.dart and
@@ -17,7 +25,15 @@ library;
 
 import 'package:chaldea/models/models.dart';
 
-import '../roster/user_roster.dart';
+import '../roster/user_roster.dart' show ServantRole, UserRoster;
+
+// ---------------------------------------------------------------------------
+// MC IDs that have Order Change as S3
+// ---------------------------------------------------------------------------
+
+/// Mystic Code IDs whose S3 is Order Change.
+/// Mirrored from candidate_converter.dart — if you add IDs there, add them here too.
+const Set<int> _kOrderChangeMcIds = {20, 210};
 
 // ---------------------------------------------------------------------------
 // Output type
@@ -25,14 +41,18 @@ import '../roster/user_roster.dart';
 
 /// One candidate team, ready to hand to the pruner/simulator.
 ///
-/// CE assignments are parallel to [servantIds]: servantIds[i] wears
-/// ceAssignments[i] (null = no CE for that slot).
+/// CE assignments are parallel to [playerSvtIds]: playerSvtIds[i] wears
+/// playerCeIds[i] (null = no CE for that slot).
 class CandidateTeam {
-  /// Servant IDs for the 5 non-support slots (indices 0-4).
-  /// Index 0 is the support slot; indices 1-5 are the player's servants.
-  /// Exactly one of indices 0-4 is the borrowed support.
+  /// The borrowed support servant ID (always in frontline slot 2).
   final int supportSvtId;
-  final List<int> playerSvtIds; // 1-5 of the player's own servants
+
+  /// Player servant IDs in layout order:
+  ///   [0]: frontline slot 0
+  ///   [1]: frontline slot 1
+  ///   [2+]: backline slots (OC target, field-departure replacements)
+  /// Length is 2 for plain teams, 3 for OC teams, etc.
+  final List<int> playerSvtIds;
 
   /// Parallel to [playerSvtIds]. null = no CE for this slot.
   final List<int?> playerCeIds;
@@ -71,6 +91,7 @@ const List<int> kMetaSupportIds = [
   504500,  // Altria Caster "Castoria" (collectionNo 339) — Arts
   503900,  // Scathach-Skadi (collectionNo 198) — Quick
   2800100, // Oberon-Vortigern (collectionNo 352) — Buster
+  604200,  // Koyanskaya of Light "Vitch" (collectionNo 368) — Buster charge
   501900,  // Zhuge Liang / Lord El-Melloi II "Waver" (collectionNo 37) — universal charge
   500800,  // Merlin (collectionNo 150) — Buster
   // Add more as the meta evolves
@@ -87,15 +108,10 @@ class Enumerator {
   /// Override which support IDs to consider. Defaults to [kMetaSupportIds].
   final List<int> supportIds;
 
-  /// How many of the player's servants to put in each team.
-  /// For standard 6-slot teams: 5 (1 support + 5 player = 6 total).
-  final int playerSlotsPerTeam;
-
   Enumerator({
     required this.roster,
     required this.quest,
     List<int>? supportIds,
-    this.playerSlotsPerTeam = 5,
   }) : supportIds = supportIds ?? kMetaSupportIds;
 
   // -------------------------------------------------------------------------
@@ -119,23 +135,40 @@ class Enumerator {
     final sortedCeIds = _sortedCeIds();
     final mcChoices = _mysticCodeChoices();
 
-    // All combinations of 'playerSlotsPerTeam' servants from roster
-    final svtCombos = _combinations(sortedSvtIds, playerSlotsPerTeam);
+    // Frontline is always exactly 2 player servants (+ borrowed support = 3 total).
+    final frontlineCombos = _combinations(sortedSvtIds, 2);
 
     for (final supportId in _sortedSupportIds()) {
       for (final mcChoice in mcChoices) {
-        for (final svtCombo in svtCombos) {
-          // CE assignments: for each servant slot, try CEs in priority order.
-          // The null CE (no CE) is always tried last.
-          for (final ceAssignment in _ceAssignments(svtCombo, sortedCeIds)) {
-            yield CandidateTeam(
-              supportSvtId: supportId,
-              playerSvtIds: svtCombo,
-              playerCeIds: ceAssignment,
-              supportCeId: null, // support CE not controlled by us
-              mysticCodeId: mcChoice?.key,
-              mysticCodeLevel: mcChoice?.value ?? 10,
-            );
+        final ocSlots = _hasOrderChange(mcChoice?.key) ? 1 : 0;
+
+        for (final frontlineCombo in frontlineCombos) {
+          // Extra backline slots needed for servants that depart the field
+          // (e.g. Arash NP self-death → replacement needed).
+          final departures = _fieldDepartureCount(frontlineCombo);
+          final backlineSize = ocSlots + departures;
+
+          // Remaining servants available for backline (not already in frontline).
+          final remaining = sortedSvtIds
+              .where((id) => !frontlineCombo.contains(id))
+              .toList();
+
+          final backlineCombos = backlineSize > 0
+              ? _combinations(remaining, backlineSize)
+              : [<int>[]];
+
+          for (final backlineCombo in backlineCombos) {
+            final allPlayerIds = [...frontlineCombo, ...backlineCombo];
+            for (final ceAssignment in _ceAssignments(allPlayerIds, sortedCeIds)) {
+              yield CandidateTeam(
+                supportSvtId: supportId,
+                playerSvtIds: allPlayerIds,
+                playerCeIds: ceAssignment,
+                supportCeId: null, // support CE not controlled by us
+                mysticCodeId: mcChoice?.key,
+                mysticCodeLevel: mcChoice?.value ?? 10,
+              );
+            }
           }
         }
       }
@@ -168,6 +201,15 @@ class Enumerator {
       final lvA = roster.servants[a]!.level;
       final lvB = roster.servants[b]!.level;
       if (lvA != lvB) return lvB - lvA;
+
+      // Attacker-tagged servants before support-only — ensures attacker-tagged
+      // servants at the same level land in frontline slots (0-1) rather than
+      // being displaced by support servants of equal level.
+      final atkA =
+          roster.servants[a]!.roles.contains(ServantRole.attacker) ? 0 : 1;
+      final atkB =
+          roster.servants[b]!.roles.contains(ServantRole.attacker) ? 0 : 1;
+      if (atkA != atkB) return atkA - atkB;
 
       // Higher NP level first
       final npA = roster.servants[a]!.npLevel;
@@ -246,13 +288,12 @@ class Enumerator {
     final assignment = <int?>[for (final _ in svtIds) null];
 
     // Try with best CEs first (greedy assignment).
-    // Only assign CEs to servants with a damaging NP — CEs on supports
-    // (Castoria, Vitch, Oberon, etc.) don't affect farming output and
-    // would otherwise inflate the candidate count with meaningless variants.
+    // Only assign CEs to attacker-tagged servants — CEs on supports don't
+    // affect farming output and would inflate the candidate count.
     final usedCopies = <int, int>{};
     for (int i = 0; i < svtIds.length; i++) {
-      final svt = db.gameData.servantsById[svtIds[i]];
-      if (svt == null || !_hasDamageNp(svt)) continue;
+      final owned = roster.servants[svtIds[i]];
+      if (owned == null || !owned.roles.contains(ServantRole.attacker)) continue;
       for (final ceId in sortedCeIds) {
         final used = usedCopies[ceId] ?? 0;
         if (used < remaining[ceId]!) {
@@ -291,19 +332,35 @@ class Enumerator {
   }
 
   // -------------------------------------------------------------------------
+  // Backline size helpers
+  // -------------------------------------------------------------------------
+
+  /// True if [mcId] is a Mystic Code whose S3 is Order Change.
+  bool _hasOrderChange(int? mcId) =>
+      mcId != null && _kOrderChangeMcIds.contains(mcId);
+
+  /// Returns the number of extra backline slots needed for servants in
+  /// [frontlineSvtIds] that will depart the field during the battle
+  /// (e.g. Arash whose NP kills him, Chen Gong who sacrifices an ally).
+  ///
+  /// Each departing servant needs one replacement in the backline, otherwise
+  /// the empty slot wastes a field position for the remainder of the fight.
+  ///
+  /// TODO: implement departure detection by scanning servant NPs and skills
+  /// for self-death, ally-sacrifice, or field-swap functions. For now returns
+  /// 0 because no current roster servants have departure mechanics.
+  int _fieldDepartureCount(List<int> frontlineSvtIds) => 0;
+
+  // -------------------------------------------------------------------------
   // Game data helpers
   // -------------------------------------------------------------------------
 
+  /// Returns true if the servant has an AoE NP in any of their NP variants.
+  /// Checks all variants so form-change servants (e.g. Mélusine, who starts
+  /// with an ST NP but unlocks an AoE NP via S3) are sorted as AoE attackers.
   bool _isAoeNp(Servant svt) {
-    final np = svt.groupedNoblePhantasms[1]?.firstOrNull;
-    if (np == null) return false;
-    return np.damageType == TdEffectFlag.attackEnemyAll;
-  }
-
-  bool _hasDamageNp(Servant svt) {
-    final np = svt.groupedNoblePhantasms[1]?.firstOrNull;
-    if (np == null) return false;
-    return np.damageType != TdEffectFlag.support;
+    final nps = svt.groupedNoblePhantasms[1] ?? [];
+    return nps.any((np) => np.damageType == TdEffectFlag.attackEnemyAll);
   }
 
   /// Returns the NP charge % this CE provides at battle start (0–100).

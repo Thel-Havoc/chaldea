@@ -18,6 +18,8 @@ import 'package:tuple/tuple.dart';
 import 'package:chaldea/app/battle/interactions/_delegate.dart';
 import 'package:chaldea/app/battle/models/battle.dart';
 import 'package:chaldea/models/models.dart';
+
+import '../roster/run_history.dart';
 import 'package:chaldea/utils/extension.dart';
 
 // ---------------------------------------------------------------------------
@@ -176,6 +178,34 @@ class SimulationResult {
 }
 
 // ---------------------------------------------------------------------------
+// CandidateResult — returned by a worker after evaluating a full team
+// ---------------------------------------------------------------------------
+
+/// The aggregated result of simulating all specs for one [CandidateTeam].
+class CandidateResult {
+  /// Total specs simulated for this candidate (including non-clears).
+  final int specsChecked;
+
+  /// Total specs returned by [CandidateConverter.convert] for this candidate
+  /// (after intra-candidate dedup, before simulation early-exit).
+  final int specsGenerated;
+
+  /// Number of specs that produced a [SimulationOutcome.error].
+  final int simulationErrors;
+
+  /// Every clearing [RunRecord] found. Usually 0 or 1 when
+  /// [oneClearPerCandidate] is true; may be more in exhaustive mode.
+  final List<RunRecord> clears;
+
+  const CandidateResult({
+    required this.specsChecked,
+    this.specsGenerated = 0,
+    this.simulationErrors = 0,
+    required this.clears,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // HeadlessRunner
 // ---------------------------------------------------------------------------
 
@@ -184,6 +214,17 @@ const int _kMaxTurns = 3;
 
 class HeadlessRunner {
   final QuestPhase quest;
+
+  /// Single [BattleData] instance reused across all [run] calls.
+  ///
+  /// Reuse avoids allocating a fresh ~40 KB object for every spec. The Dart GC
+  /// stop-the-world phase requires every isolate in the group to reach a
+  /// safepoint simultaneously; workers that keep allocating new [BattleData]
+  /// objects between safepoints block GC from completing, stalling the root
+  /// isolate for the entire run. With reuse the old generation stays small and
+  /// GC can complete between candidates instead of at the very end.
+  final BattleData _battleData = BattleData();
+
 
   HeadlessRunner({required this.quest});
 
@@ -218,6 +259,16 @@ class HeadlessRunner {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Per-candidate API — call initForCandidate() once, then runCandidateSpec()
+  // for each spec. Avoids recreating BattleServantData (the dominant GC source)
+  // by resetting servant state in-place between specs.
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Simulation — full BattleData.init() per spec
+  // ---------------------------------------------------------------------------
+
   Future<SimulationResult> _simulate(TeamSpec spec, {bool pessimistic = false}) async {
     // --- 1. Build PlayerSvtData list ---
     final playerSettings = _buildPlayerSettings(spec);
@@ -226,28 +277,25 @@ class HeadlessRunner {
     final mcData = _buildMysticCodeData(spec);
 
     // --- 3. Set up BattleData ---
-    final battleData = BattleData();
-    // context is null by default → mounted = false → no UI dialogs
-    // options.manualAllySkillTarget is false by default → _acquireTarget is a no-op
-    // options.tailoredExecution = false (don't wait for tailored execution confirm)
-
-    // Inject a delegate to handle Order Change and randomness deterministically.
-    // damageRandom = max value gives us the upper-bound damage estimate (optimistic).
-    // pessimistic=true uses min to check whether a clear is guaranteed (no RNG needed).
-    battleData.delegate = _buildDelegate(spec, pessimistic: pessimistic);
+    _battleData.resetForReuse();
+    _battleData.delegate = _buildDelegate(spec, pessimistic: pessimistic);
 
     dev.Timeline.startSync('BattleData.init');
-    await battleData.init(quest, playerSettings, mcData);
+    await _battleData.init(quest, playerSettings, mcData);
     dev.Timeline.finishSync(); // BattleData.init
-    // Snapshots are taken before each action for undo support. We never undo
-    // in headless mode, so clear after init to avoid carrying stale copies.
-    battleData.snapshots.clear();
+    _battleData.snapshots.clear();
 
-    // --- 4. Execute turn sequence ---
+    return await _executeTurns(spec);
+  }
+
+  /// Executes the turn sequence on the already-configured [_battleData].
+  /// Called by both [_simulate] and [runCandidateSpec].
+  Future<SimulationResult> _executeTurns(TeamSpec spec) async {
+    // --- Execute turn sequence ---
     dev.Timeline.startSync('BattleData.turns');
     for (int turnIndex = 0; turnIndex < spec.turns.length; turnIndex++) {
-      if (battleData.isBattleWin) break;
-      if (battleData.isBattleFinished) break;
+      if (_battleData.isBattleWin) break;
+      if (_battleData.isBattleFinished) break;
 
       final turnActions = spec.turns[turnIndex];
 
@@ -255,26 +303,26 @@ class HeadlessRunner {
       for (final skillAction in turnActions.skills) {
         if (skillAction.slotIndex == -1) {
           // Mystic Code skill
-          await battleData.activateMysticCodeSkill(skillAction.skillIndex);
+          await _battleData.activateMysticCodeSkill(skillAction.skillIndex);
         } else {
           // Set target indices before activation for targeted skills
-          battleData.enemyTargetIndex = skillAction.enemyTarget;
+          _battleData.enemyTargetIndex = skillAction.enemyTarget;
           if (skillAction.allyTarget != null) {
-            battleData.playerTargetIndex = skillAction.allyTarget!;
+            _battleData.playerTargetIndex = skillAction.allyTarget!;
           }
-          await battleData.activateSvtSkill(skillAction.slotIndex, skillAction.skillIndex);
+          await _battleData.activateSvtSkill(skillAction.slotIndex, skillAction.skillIndex);
         }
         // Discard the undo snapshot and battle records — we never replay or
         // display anything in headless mode, so keeping these is pure waste.
         // Clearing between actions means each snapshot only copies a tiny recorder.
-        battleData.snapshots.clear();
-        battleData.recorder.records.clear();
+        _battleData.snapshots.clear();
+        _battleData.recorder.records.clear();
       }
 
       // Build NP CombatActions
       final actions = <CombatAction>[];
       for (final npSlot in turnActions.npSlots) {
-        final svt = battleData.onFieldAllyServants.getOrNull(npSlot);
+        final svt = _battleData.onFieldAllyServants.getOrNull(npSlot);
         if (svt == null) continue;
         final npCard = svt.getNPCard();
         if (npCard == null) continue;
@@ -284,23 +332,23 @@ class HeadlessRunner {
       }
 
       if (actions.isNotEmpty) {
-        await battleData.playerTurn(actions, allowSkip: false);
+        await _battleData.playerTurn(actions, allowSkip: false);
       } else if (turnActions.npSlots.isEmpty) {
         // A pure skill-only turn with no NP (uncommon in farming)
-        await battleData.playerTurn([], allowSkip: true);
+        await _battleData.playerTurn([], allowSkip: true);
       }
       // If we expected NPs but none were ready, that's a failure path —
       // fall through and let isBattleWin = false handle it.
-      battleData.snapshots.clear();
-      battleData.recorder.records.clear();
+      _battleData.snapshots.clear();
+      _battleData.recorder.records.clear();
 
-      if (battleData.isBattleWin) break;
+      if (_battleData.isBattleWin) break;
     }
     dev.Timeline.finishSync(); // BattleData.turns
 
     // --- 5. Report result ---
-    final turns = battleData.totalTurnCount;
-    if (battleData.isBattleWin && turns <= _kMaxTurns) {
+    final turns = _battleData.totalTurnCount;
+    if (_battleData.isBattleWin && turns <= _kMaxTurns) {
       return SimulationResult.cleared(turns);
     }
     return SimulationResult.notCleared(turns);

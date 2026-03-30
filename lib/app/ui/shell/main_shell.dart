@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../quest/debug_tab.dart';
 import '../quest/quest_screen.dart';
 import '../quest/results_screen.dart';
 import '../roster/roster_screen.dart';
@@ -36,6 +37,11 @@ class _MainShellState extends State<MainShell> {
       selectedIcon: Icon(Icons.emoji_events),
       label: Text('Results'),
     ),
+    NavigationRailDestination(
+      icon: Icon(Icons.bug_report_outlined),
+      selectedIcon: Icon(Icons.bug_report),
+      label: Text('Debug'),
+    ),
   ];
 
   @override
@@ -64,6 +70,8 @@ class _MainShellState extends State<MainShell> {
         return const QuestScreen();
       case 2:
         return const ResultsScreen();
+      case 3:
+        return const DebugTab();
       default:
         return const SizedBox.shrink();
     }

@@ -199,34 +199,44 @@ class _QuestScreenState extends State<QuestScreen> {
                     ?.copyWith(color: Theme.of(context).colorScheme.error)),
           const SizedBox(height: 24),
 
-          // Run button
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: (run.selectedQuest == null ||
-                      run.isRunning ||
-                      run.isLoadingPhase ||
-                      run.loadedPhase == null)
-                  ? null
-                  : () => run.run(roster),
-              child: run.isRunning
-                  ? const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        ),
-                        SizedBox(width: 8),
-                        Text('Running…'),
-                      ],
-                    )
-                  : const Text('Run Optimizer'),
-            ),
+          // Run / Stop buttons
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton(
+                  onPressed: (run.selectedQuest == null ||
+                          run.isRunning ||
+                          run.isLoadingPhase ||
+                          run.loadedPhase == null)
+                      ? null
+                      : () => run.run(roster),
+                  child: run.isRunning
+                      ? const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Text('Running…'),
+                          ],
+                        )
+                      : const Text('Run Optimizer'),
+                ),
+              ),
+              if (run.isRunning) ...[
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: run.isStopping ? null : run.stopRun,
+                  child: Text(run.isStopping ? 'Stopping…' : 'Stop'),
+                ),
+              ],
+            ],
           ),
           const SizedBox(height: 16),
 
@@ -285,7 +295,10 @@ class _StatusCardState extends State<_StatusCard> {
 
   void _onRunChanged() {
     if (widget.run.isRunning) {
-      _startTicker();
+      // Only start the ticker once per run — do NOT restart on every
+      // notifyListeners() call or the 1-second ticker will be cancelled and
+      // recreated before it ever fires.
+      if (_ticker == null) _startTicker();
     } else {
       _ticker?.cancel();
       _ticker = null;
@@ -312,7 +325,9 @@ class _StatusCardState extends State<_StatusCard> {
     final run = widget.run;
     final elapsed = _fmt(run.elapsed);
     final statusText = run.isRunning
-        ? 'Checking… ${run.specsChecked} specs ($elapsed)'
+        ? run.isStopping
+            ? 'Stopping… ${run.specsChecked} specs ($elapsed)'
+            : 'Checking… ${run.specsChecked} specs ($elapsed)'
         : 'Done — ${run.specsChecked} specs checked in $elapsed';
 
     final errorColor = Theme.of(context).colorScheme.error;

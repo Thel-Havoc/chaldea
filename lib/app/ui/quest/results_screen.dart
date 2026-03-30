@@ -32,30 +32,14 @@ class GroupedResult {
   /// CEs on supports don't affect farming outcome, so putting Bella Lisa
   /// on Castoria shouldn't create a different "team" in the results.
   static String keyFor(RunRecord r) {
-    final activeSlots = <int>{};
-    final attackerSlots = <int>{};
-    for (final action in r.battleData.actions) {
-      if (action.type == BattleRecordDataType.skill) {
-        final svt = action.svt;
-        if (svt != null) activeSlots.add(svt);
-      } else if (action.type == BattleRecordDataType.attack) {
-        for (final a in action.attacks ?? []) {
-          if (a.isTD) {
-            activeSlots.add(a.svt);
-            attackerSlots.add(a.svt);
-          }
-        }
-      }
-    }
+    final (:activeSlots, :attackerSlots) = _resolveSlots(r);
 
     final svts = r.battleData.formation.svts;
     final sorted = activeSlots.toList()..sort();
-    return sorted.map((i) {
+    final svtPart = sorted.map((i) {
       final s = svts.getOrNull(i);
       final svtId = s?.svtId ?? 0;
       // Include CE only for attacker slots whose NP actually deals damage.
-      // Support servants (Castoria, Merlin, Waver, Oberon) have damageType==support
-      // so their CE never affects farming outcome even if they fire NP.
       final np = svtId != 0
           ? db.gameData.servantsById[svtId]?.groupedNoblePhantasms[1]?.firstOrNull
           : null;
@@ -63,6 +47,10 @@ class GroupedResult {
       final ceId = (attackerSlots.contains(i) && hasDamageNp) ? (s?.equip1.id ?? 0) : 0;
       return '$i:$svtId:$ceId';
     }).join('|');
+
+    // Include MC in the key — same servants with different MCs are different teams.
+    final mcId = r.battleData.formation.mysticCode.mysticCodeId ?? 0;
+    return '$svtPart|mc:$mcId';
   }
 
   /// True if any spec in this group clears without RNG dependence.
@@ -77,28 +65,60 @@ class GroupedResult {
   /// Formation slots — same for every record in the group.
   List<SvtSaveData?> get slots => records.first.battleData.formation.svts;
 
-  /// Slot indices of servants that fire an NP (from the first record's log).
-  Set<int> get attackerSlots => records.first.battleData.actions
-      .where((a) => a.type == BattleRecordDataType.attack)
-      .expand((a) => a.attacks ?? [])
-      .where((a) => a.isTD)
-      .map((a) => a.svt as int)
-      .toSet();
+  /// Slot indices of servants that fire an NP (from the first record's log),
+  /// remapped to original formation indices after any Order Changes.
+  Set<int> get attackerSlots => _resolveSlots(records.first).attackerSlots;
 
-  /// Slot indices of all servants who appear in any action (skill or NP).
-  Set<int> get activeSlots {
-    final result = <int>{};
-    for (final action in records.first.battleData.actions) {
+  /// Slot indices of all servants who appear in any action (skill or NP),
+  /// remapped to original formation indices after any Order Changes.
+  Set<int> get activeSlots => _resolveSlots(records.first).activeSlots;
+
+  /// Resolves active and attacker formation-slot indices from the action log,
+  /// applying Order Change remapping so post-swap servant skills are
+  /// attributed to the correct original formation slot.
+  ///
+  /// Without this, a servant like Oberon who swaps in via Order Change would
+  /// be attributed to the servant who occupied his field slot before the swap.
+  static ({Set<int> activeSlots, Set<int> attackerSlots}) _resolveSlots(
+      RunRecord r) {
+    final active = <int>{};
+    final attackers = <int>{};
+    // Maps field-slot index → original formation-slot index. Starts as identity.
+    final slotRemap = <int, int>{};
+    int ocIdx = 0;
+    final delegate = r.battleData.delegate;
+
+    for (final action in r.battleData.actions) {
       if (action.type == BattleRecordDataType.skill) {
         final svt = action.svt;
-        if (svt != null) result.add(svt);
+        if (svt != null) {
+          active.add(slotRemap[svt] ?? svt);
+        } else if (action.skill == 2 &&
+            delegate != null &&
+            ocIdx < delegate.replaceMemberIndexes.length) {
+          // MC S3 Order Change: the incoming servant gets added to active slots.
+          final pair = delegate.replaceMemberIndexes[ocIdx++];
+          final fieldSlot = pair[0];
+          final backlineFormationSlot = 3 + pair[1];
+          active.add(slotRemap[backlineFormationSlot] ?? backlineFormationSlot);
+          // Swap the remap entries for the two involved slots.
+          final prevField = slotRemap[fieldSlot] ?? fieldSlot;
+          final prevBench = slotRemap[backlineFormationSlot] ?? backlineFormationSlot;
+          slotRemap[fieldSlot] = prevBench;
+          slotRemap[backlineFormationSlot] = prevField;
+        }
       } else if (action.type == BattleRecordDataType.attack) {
         for (final a in action.attacks ?? []) {
-          if (a.isTD) result.add(a.svt);
+          if (a.isTD) {
+            final orig = slotRemap[a.svt] ?? a.svt;
+            active.add(orig);
+            attackers.add(orig);
+          }
         }
       }
     }
-    return result;
+
+    return (activeSlots: active, attackerSlots: attackers);
   }
 }
 
@@ -191,10 +211,14 @@ class _ClearGroupTile extends StatelessWidget {
     final active = group.activeSlots.toList()..sort();
     final attackerSlots = group.attackerSlots;
 
-    // Only servants who actually participate in combat, with role label
+    // Only servants who actually participate in combat, with role label.
+    // Borrowed friend supports get [FRIEND] instead of [ATK]/[SUP].
     final svtNames = active.map((i) {
       final name = _svtName(slots.getOrNull(i)?.svtId);
-      final role = attackerSlots.contains(i) ? ' [ATK]' : ' [SUP]';
+      final isFriend = slots.getOrNull(i)?.supportType == SupportSvtType.friend;
+      final role = isFriend
+          ? ' [FRIEND]'
+          : attackerSlots.contains(i) ? ' [ATK]' : ' [SUP]';
       return name + role;
     }).toList();
 
@@ -202,6 +226,12 @@ class _ClearGroupTile extends StatelessWidget {
     final ceParts = (attackerSlots.toList()..sort())
         .map((idx) => _ceName(slots.getOrNull(idx)?.equip1.id))
         .toList();
+
+    // Mystic Code name (null if no MC used)
+    final mcId = group.records.first.battleData.formation.mysticCode.mysticCodeId;
+    final mcName = (mcId != null && mcId != 0)
+        ? (db.gameData.mysticCodes[mcId]?.lName.l ?? 'MC $mcId')
+        : null;
 
     final variantText = group.records.length == 1
         ? '1 variant · ${group.bestButtonPresses} presses'
@@ -221,10 +251,12 @@ class _ClearGroupTile extends StatelessWidget {
               style: textTheme.bodySmall,
               overflow: TextOverflow.ellipsis,
             ),
+          if (mcName != null)
+            Text('MC: $mcName', style: textTheme.bodySmall),
           Text(variantText, style: textTheme.bodySmall),
         ],
       ),
-      isThreeLine: ceParts.isNotEmpty,
+      isThreeLine: ceParts.isNotEmpty || mcName != null,
       trailing: const Icon(Icons.chevron_right),
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(
@@ -269,11 +301,42 @@ class _StatusBar extends StatelessWidget {
         ? 'Searching… ${_fmt(run.specsChecked)} specs · $clearText'
         : '${_fmt(run.specsChecked)} specs checked · $clearText';
 
+    // Progress fraction — only meaningful while running and after pruning completes.
+    final total = run.candidatesPassed;
+    final progress = (run.isRunning && total > 0)
+        ? (run.candidatesProcessed / total).clamp(0.0, 1.0)
+        : null;
+
     return Container(
       width: double.infinity,
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Text(label, style: Theme.of(context).textTheme.bodySmall),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (progress != null) ...[
+            Row(
+              children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 4,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${(progress * 100).toStringAsFixed(0)}%'
+                  ' (${run.candidatesProcessed}/$total)',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+          ],
+          Text(label, style: Theme.of(context).textTheme.bodySmall),
+        ],
+      ),
     );
   }
 

@@ -1,16 +1,25 @@
 /// OptimizerEngine — wires the full multi-pass search pipeline end-to-end.
 ///
 /// Pipeline:
-///   Enumerator → [PassContext]
-///     └→ PatternPass    (minutes  — replay prior clears from RunHistory)
-///     └→ RulesPass      (hours    — CandidateConverter 6-dimension enumeration)
-///     └→ BruteForcePass (days     — {T1,T2,T3} exhaustive turn assignment)
-///   Each pass yields TeamSpecs → deduplication → HeadlessRunner
-///       └→ (on clear) ShareDataConverter → RunHistory
+///   Enumerator → pruning → [per-pass dispatch]
+///     └→ PatternPass    (serial, tiny — history replay, <100 specs)
+///     └→ RulesPass      (parallel, candidate-level — each worker owns one team)
+///     └→ BruteForcePass (parallel, candidate-level — same dispatch model)
 ///
-/// Deduplication: every TeamSpec is assigned a canonical hash before simulation.
-/// A spec whose hash is already in [_simulated] is skipped — no pass ever
-/// simulates the same action sequence twice, even if multiple passes generate it.
+/// Dispatch model:
+///   The dispatch unit is a [CandidateTeam], not a [TeamSpec]. Each worker
+///   receives one candidate, generates all specs for it internally via
+///   CandidateConverter, simulates them, and returns a [CandidateResult].
+///   This eliminates the per-spec round-trip overhead that previously made the
+///   engine isolate the throughput ceiling.
+///
+/// Cancellation:
+///   [isCancelled] is polled between candidate dispatches. The engine runner
+///   wires this to a control port so the UI can send a stop signal that takes
+///   effect as soon as the current in-flight candidates complete.
+///
+/// Concurrency: [workerCount] Dart Isolates run candidates in parallel. A
+/// semaphore limits in-flight dispatches to [workerCount] at a time.
 ///
 /// Usage:
 ///   final engine = OptimizerEngine(
@@ -19,17 +28,14 @@
 ///     historyFilePath: 'optimizer_profiles/history_94093408.jsonl',
 ///   );
 ///   final clears = await engine.run();
-///
-/// [onProgress] fires after every N specs are simulated, giving the UI a
-/// chance to update. [maxClears] stops the search early once enough solutions
-/// are found (0 = run to completion).
 library;
 
-import 'dart:developer' as dev;
+import 'dart:async';
+import 'dart:collection';
+import 'dart:ui' show RootIsolateToken;
 
 import 'package:chaldea/models/models.dart';
 
-import 'passes/brute_force_pass.dart';
 import 'passes/optimizer_pass.dart';
 import 'passes/pattern_pass.dart';
 import 'passes/rules_pass.dart';
@@ -37,8 +43,9 @@ import 'roster/run_history.dart';
 import 'roster/user_roster.dart';
 import 'search/enumerator.dart';
 import 'search/pruner.dart';
-import 'simulation/headless_runner.dart' show SimulationOutcome, TeamSpec;
-import 'simulation/headless_worker.dart';
+import 'simulation/headless_runner.dart'
+    show CandidateResult, SimulationOutcome;
+import 'simulation/headless_worker_pool.dart';
 import 'simulation/share_data_converter.dart';
 
 class OptimizerEngine {
@@ -48,25 +55,67 @@ class OptimizerEngine {
   /// If non-null, every clearing [RunRecord] is appended to this JSONL file.
   final String? historyFilePath;
 
-  /// Called periodically with (specsSimulated, clearsFound) so the UI can
-  /// show progress. Defaults to every 50 specs simulated.
-  final void Function(int checked, int cleared)? onProgress;
+  /// Called periodically with (specsSimulated, clearsFound).
+  /// With candidate-level dispatch this fires once per completed team, so the
+  /// spec count advances in larger jumps than before.
+  final void Function(int checked, int cleared, int engineMs)? onProgress;
   final int progressInterval;
 
-  /// Called immediately when a clearing spec is found, before [run] returns.
-  /// Use this to update a live results list while the engine is still running.
+  /// Called immediately when a clearing spec is found.
   final void Function(RunRecord record)? onClear;
 
   /// Called when a spec produces a [SimulationOutcome.error] result.
-  /// The first error message is passed so the UI can surface it for debugging.
   final void Function(String errorMessage)? onSimulationError;
+
+  /// Called each time a worker subprocess dies. [totalDeaths] is cumulative.
+  final void Function(int totalDeaths)? onWorkerDied;
+
+  /// Called once after pruning, before simulation begins.
+  final void Function(int candidatesTotal, int gate1Blocked, int gate2Blocked)?
+      onGateStats;
+
+  /// Called once at the end of [run] with per-servant simulation stats.
+  final void Function(
+    Map<int, int> specsPerSvt,
+    Map<int, int> clearsPerSvt,
+  )? onServantStats;
+
+  /// Called each time a candidate is dispatched to a worker.
+  /// [processed] is 1-based; [total] is the number of candidates that passed pruning.
+  final void Function(int processed, int total)? onCandidateProcessed;
+
+  /// Called once at the end of [run] with summary stats for MC type breakdown.
+  /// [specsGenerated] = total specs from converter (post-dedup, pre-early-exit).
+  /// [plugSuitCandidates] = number of candidates that used Plug Suit MC.
+  /// [plugSuitSpecsGenerated] = total specs generated for Plug Suit candidates.
+  /// [plugSuitSpecsChecked] = total specs simulated for Plug Suit candidates.
+  final void Function(
+    int specsGenerated,
+    int plugSuitCandidates,
+    int plugSuitSpecsGenerated,
+    int plugSuitSpecsChecked,
+  )? onRunStats;
 
   /// Stop after finding this many clears. 0 = run all candidates.
   final int maxClears;
 
+  /// When true (default), each worker stops after the first clearing spec for
+  /// its assigned team. Set to false to collect all clearing variants.
+  final bool oneClearPerCandidate;
+
   /// Passes to run, in order. Defaults to [PatternPass, RulesPass, BruteForcePass].
-  /// Override to run a subset (e.g. tests that only want RulesPass).
   final List<OptimizerPass>? passes;
+
+  /// Number of parallel worker Isolates. Defaults to 1.
+  final int workerCount;
+
+  /// Token from the root Flutter isolate — passed through to the worker pool.
+  final RootIsolateToken? rootIsolateToken;
+
+  /// Polled between candidate dispatches. When it returns true the engine
+  /// finishes any in-flight candidates and exits cleanly. Wired to the
+  /// engine runner's control port in normal operation.
+  final bool Function()? isCancelled;
 
   OptimizerEngine({
     required this.quest,
@@ -76,27 +125,42 @@ class OptimizerEngine {
     this.progressInterval = 50,
     this.onClear,
     this.onSimulationError,
+    this.onWorkerDied,
+    this.onGateStats,
+    this.onServantStats,
+    this.onCandidateProcessed,
+    this.onRunStats,
     this.maxClears = 0,
+    this.oneClearPerCandidate = true,
     this.passes,
+    this.workerCount = 1,
+    this.rootIsolateToken,
+    this.isCancelled,
   });
 
-  /// Runs all passes in order and returns every clearing [RunRecord] found.
-  ///
-  /// Simulation runs in a background Dart Isolate via [HeadlessWorker], so
-  /// the main/UI thread is never blocked regardless of how long individual
-  /// specs take. Each `await worker.run(spec)` is a genuine async round-trip
-  /// that yields to the event loop between specs.
   Future<List<RunRecord>> run() async {
-    final enumerator = Enumerator(roster: roster, quest: quest);
-    final worker = HeadlessWorker(quest: quest);
+    final pool = HeadlessWorkerPool(
+      quest: quest,
+      roster: roster,
+      size: workerCount,
+      rootIsolateToken: rootIsolateToken,
+      onWorkerDied: onWorkerDied,
+    );
     final history = historyFilePath != null ? RunHistory(historyFilePath!) : null;
 
-    // Pre-generate candidates once and prune impossible teams before passing
-    // them to any pass. Both gates are fast (arithmetic + skill scan), so this
-    // pays back on every non-trivial roster.
+    pool.warmUp();
+
+    // Pre-generate and prune candidates once, shared across all passes.
+    final enumerator = Enumerator(roster: roster, quest: quest);
     final pruner = Pruner(quest: quest, roster: roster);
     final candidates =
         enumerator.candidates().where(pruner.passes).toList();
+
+    onGateStats?.call(
+      candidates.length + pruner.gate1Blocked + pruner.gate2Blocked,
+      pruner.gate1Blocked,
+      pruner.gate2Blocked,
+    );
 
     final ctx = PassContext(
       quest: quest,
@@ -105,140 +169,197 @@ class OptimizerEngine {
       history: history,
     );
 
-    final activePasses = passes ?? [PatternPass(), RulesPass(), BruteForcePass()];
+    // RulesPass is excluded from the default list until it is implemented with
+    // PatternPass uses spec-level dispatch (generate()). RulesPass uses the
+    // candidate-level dispatch below (the non-PatternPass branch). BruteForcePass
+    // is excluded until implemented — it also falls into the candidate-level
+    // branch and would double-dispatch every candidate if included as a stub.
+    final activePasses = passes ?? [PatternPass(), RulesPass()];
 
     final clears = <RunRecord>[];
-    final simulated = <String>{};
+    final svtSpecCounts = <int, int>{};
+    final svtClearCounts = <int, int>{};
     int checked = 0;
     bool done = false;
+    int specsGenerated = 0;
+    int plugSuitCandidates = 0;
+    int plugSuitSpecsGenerated = 0;
+    int plugSuitSpecsChecked = 0;
+
+    // ---------------------------------------------------------------------------
+    // Helper: accumulate per-servant stats from a completed candidate result.
+    // ---------------------------------------------------------------------------
+    void accumulateStats(CandidateTeam candidate, CandidateResult result) {
+      final svtIds = [
+        ...candidate.playerSvtIds,
+        candidate.supportSvtId,
+      ];
+      for (final id in svtIds) {
+        svtSpecCounts[id] = (svtSpecCounts[id] ?? 0) + result.specsChecked;
+        if (result.clears.isNotEmpty) {
+          svtClearCounts[id] =
+              (svtClearCounts[id] ?? 0) + result.clears.length;
+        }
+      }
+    }
 
     try {
       for (final pass in activePasses) {
-        if (done) break;
+        if (done || (isCancelled?.call() ?? false)) break;
 
-        await for (final spec in pass.generate(ctx)) {
-          final key = _canonicalKey(spec);
-          if (simulated.contains(key)) continue;
-          simulated.add(key);
-
-          dev.Timeline.startSync('spec.simulate');
-          final result = await worker.run(spec);
-          dev.Timeline.finishSync();
-          checked++;
-
-          if (result.outcome == SimulationOutcome.error) {
-            onSimulationError?.call(result.errorMessage ?? 'unknown error');
+        if (pass is PatternPass) {
+          // ---------------------------------------------------------------------------
+          // PatternPass: serial inline dispatch (tiny — history replay, <100 specs).
+          // Run individual specs through the pool so workers are reused once ready.
+          // ---------------------------------------------------------------------------
+          await for (final spec in pass.generate(ctx)) {
+            if (done || (isCancelled?.call() ?? false)) break;
+            try {
+              final result = await pool.run(spec);
+              checked++;
+              if (result.outcome == SimulationOutcome.error) {
+                onSimulationError
+                    ?.call(result.errorMessage ?? 'unknown error');
+              }
+              if (result.cleared) {
+                final minResult =
+                    await pool.run(spec, pessimistic: true);
+                final shareData =
+                    ShareDataConverter.convert(quest, spec);
+                final record = RunRecord(
+                  timestamp: DateTime.now(),
+                  questId: quest.id,
+                  questPhase: quest.phase,
+                  totalTurns: result.totalTurns,
+                  clearsAtMinDamage: minResult.cleared,
+                  battleData: shareData,
+                );
+                clears.add(record);
+                history?.append(record);
+                onClear?.call(record);
+                if (maxClears > 0 && clears.length >= maxClears) {
+                  done = true;
+                }
+              }
+            } catch (e, st) {
+              onSimulationError?.call('Pattern spec error: $e\n$st');
+            }
           }
+          onProgress?.call(checked, clears.length, DateTime.now().millisecondsSinceEpoch);
+          continue;
+        }
 
-          if (result.cleared) {
-            // Re-run at minimum damage to determine if this is a guaranteed clear.
-            final minResult = await worker.run(spec, pessimistic: true);
-            final shareData = ShareDataConverter.convert(quest, spec);
-            final record = RunRecord(
-              timestamp: DateTime.now(),
-              questId: quest.id,
-              questPhase: quest.phase,
-              totalTurns: result.totalTurns,
-              clearsAtMinDamage: minResult.cleared,
-              battleData: shareData,
-            );
-            clears.add(record);
-            history?.append(record);
-            onClear?.call(record);
-          }
+        // ---------------------------------------------------------------------------
+        // Candidate-level passes (RulesPass, BruteForcePass, and future passes).
+        // Each worker owns one full team for the duration of its dispatch.
+        // ---------------------------------------------------------------------------
+        final semaphore = _Semaphore(workerCount);
+        final inFlight = <Future<void>>[];
+        int candidatesDispatched = 0;
 
-          if (onProgress != null && checked % progressInterval == 0) {
-            onProgress!(checked, clears.length);
-          }
+        for (final candidate in ctx.candidates) {
+          if (done || (isCancelled?.call() ?? false)) break;
 
-          if (maxClears > 0 && clears.length >= maxClears) {
-            done = true;
+          candidatesDispatched++;
+          onCandidateProcessed?.call(candidatesDispatched, candidates.length);
+
+          await semaphore.acquire();
+          if (done || (isCancelled?.call() ?? false)) {
+            semaphore.release();
             break;
           }
+
+          // Capture for the closure.
+          final cap = candidate;
+          inFlight.add(() async {
+            try {
+              final result = await pool.runCandidate(
+                cap,
+                oneClearPerCandidate: oneClearPerCandidate,
+              );
+
+              checked += result.specsChecked;
+
+              if (result.simulationErrors > 0) {
+                onSimulationError
+                    ?.call('${result.simulationErrors} error(s) in team');
+              }
+
+              accumulateStats(cap, result);
+
+              specsGenerated += result.specsGenerated;
+              final isPlugSuit =
+                  cap.mysticCodeId == 20 || cap.mysticCodeId == 210;
+              if (isPlugSuit) {
+                plugSuitCandidates++;
+                plugSuitSpecsGenerated += result.specsGenerated;
+                plugSuitSpecsChecked += result.specsChecked;
+              }
+
+              for (final record in result.clears) {
+                clears.add(record);
+                history?.append(record);
+                onClear?.call(record);
+                if (maxClears > 0 && clears.length >= maxClears) {
+                  done = true;
+                  break;
+                }
+              }
+
+              onProgress?.call(checked, clears.length, DateTime.now().millisecondsSinceEpoch);
+            } catch (e, st) {
+              onSimulationError?.call('Candidate dispatch error: $e\n$st');
+            } finally {
+              semaphore.release();
+            }
+          }());
         }
+
+        if (inFlight.isNotEmpty) await Future.wait(inFlight);
       }
     } finally {
-      worker.dispose();
+      pool.dispose();
     }
 
-    // Final progress tick so UI reflects completion.
-    onProgress?.call(checked, clears.length);
+    onProgress?.call(checked, clears.length, DateTime.now().millisecondsSinceEpoch);
+    onServantStats?.call(svtSpecCounts, svtClearCounts);
+    onRunStats?.call(
+      specsGenerated,
+      plugSuitCandidates,
+      plugSuitSpecsGenerated,
+      plugSuitSpecsChecked,
+    );
 
     return clears;
   }
 
-  // ---------------------------------------------------------------------------
-  // Canonical hash for deduplication
-  // ---------------------------------------------------------------------------
+}
 
-  /// Builds a deterministic string key that uniquely identifies a [TeamSpec]'s
-  /// simulation inputs. Two specs with the same servants, CEs, MC, and identical
-  /// per-turn action sequences produce the same key and will not be simulated twice.
-  ///
-  /// Does NOT include quest data — the [simulated] set is per engine run (i.e.
-  /// per quest), so cross-quest pollution is not possible.
-  static String _canonicalKey(TeamSpec spec) {
-    final buf = StringBuffer();
+// ---------------------------------------------------------------------------
+// _Semaphore — limits the number of concurrently in-flight async tasks
+// ---------------------------------------------------------------------------
 
-    // Slots: servant ID + CE ID + core per-servant config that affects simulation.
-    for (final slot in spec.slots) {
-      if (slot == null) {
-        buf.write('_|');
-      } else {
-        buf
-          ..write(slot.svt.id)
-          ..write(':')
-          ..write(slot.ce?.id ?? 0)
-          ..write(':')
-          ..write(slot.level)
-          ..write(':')
-          ..write(slot.tdLevel)
-          ..write(':')
-          ..write(slot.limitCount)
-          ..write(':')
-          ..write(slot.skillLevels.join(','))
-          ..write(':')
-          ..write(slot.appendLevels.join(','))
-          ..write('|');
-      }
+class _Semaphore {
+  _Semaphore(this._count);
+
+  int _count;
+  final _waiters = Queue<Completer<void>>();
+
+  Future<void> acquire() {
+    if (_count > 0) {
+      _count--;
+      return Future.value();
     }
+    final c = Completer<void>();
+    _waiters.add(c);
+    return c.future;
+  }
 
-    // Mystic Code.
-    buf
-      ..write('mc:')
-      ..write(spec.mysticCode?.id ?? 0)
-      ..write(':')
-      ..write(spec.mysticCodeLevel)
-      ..write('|');
-
-    // Per-turn action sequence.
-    for (int t = 0; t < spec.turns.length; t++) {
-      final turn = spec.turns[t];
-      buf.write('t$t:[');
-      for (final a in turn.skills) {
-        buf
-          ..write(a.slotIndex)
-          ..write('/')
-          ..write(a.skillIndex)
-          ..write('/')
-          ..write(a.allyTarget ?? -1)
-          ..write(',');
-      }
-      buf
-        ..write(']:np[')
-        ..write(turn.npSlots.join(','))
-        ..write(']');
-      if (turn.orderChange != null) {
-        buf
-          ..write(':oc[')
-          ..write(turn.orderChange!.onFieldSlot)
-          ..write(',')
-          ..write(turn.orderChange!.backlineSlot)
-          ..write(']');
-      }
-      buf.write('|');
+  void release() {
+    if (_waiters.isNotEmpty) {
+      _waiters.removeFirst().complete();
+    } else {
+      _count++;
     }
-
-    return buf.toString();
   }
 }

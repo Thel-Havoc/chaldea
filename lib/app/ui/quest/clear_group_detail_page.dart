@@ -37,6 +37,12 @@ class _ClearGroupDetailPageState extends State<ClearGroupDetailPage> {
       return db.gameData.servantsById[svtId]?.lName.l ?? 'Svt $svtId';
     }).whereType<String>().join(' · ');
 
+    // All specs in a group share the same MC — show it in the AppBar subtitle.
+    final mcId = widget.group.records.first.battleData.formation.mysticCode.mysticCodeId;
+    final mcName = (mcId != null && mcId != 0)
+        ? (db.gameData.mysticCodes[mcId]?.lName.l ?? 'MC $mcId')
+        : null;
+
     // Sort within group: guaranteed first, then fewest presses, then turns
     final sorted = [...widget.group.records]..sort((a, b) {
         final gCmp =
@@ -48,7 +54,21 @@ class _ClearGroupDetailPageState extends State<ClearGroupDetailPage> {
       });
 
     return Scaffold(
-      appBar: AppBar(title: Text(title.isEmpty ? 'Team Details' : title)),
+      appBar: AppBar(
+        title: Text(title.isEmpty ? 'Team Details' : title),
+        bottom: mcName != null
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(24),
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    'MC: $mcName',
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
+                ),
+              )
+            : null,
+      ),
       body: ListView.builder(
         padding: const EdgeInsets.all(12),
         itemCount: sorted.length,

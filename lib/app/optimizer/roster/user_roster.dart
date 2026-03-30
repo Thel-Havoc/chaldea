@@ -14,7 +14,21 @@ import 'dart:convert';
 // ---------------------------------------------------------------------------
 // Schema version — increment ONLY when adding new fields
 // ---------------------------------------------------------------------------
-const int kRosterSchemaVersion = 1;
+const int kRosterSchemaVersion = 2;
+
+// ---------------------------------------------------------------------------
+// ServantRole
+// ---------------------------------------------------------------------------
+
+/// Whether the player wants this servant used as an attacker, a support, or both.
+///
+/// attacker — the engine will assign NP-firing turns to this servant.
+/// support  — the engine only uses this servant for skill buffs / charge.
+///
+/// Default for loaded entries with no 'roles' field is {attacker, support}
+/// so that existing rosters aren't silently broken — the engine treats them
+/// exactly as before until the user explicitly re-tags them.
+enum ServantRole { attacker, support }
 
 // ---------------------------------------------------------------------------
 // OwnedServant
@@ -38,6 +52,10 @@ class OwnedServant {
   /// Ascension stage (0-4). Affects servants whose kit changes by ascension
   /// (Melusine, Ptolemy). 4 = max ascension / final form.
   int limitCount;
+  /// Attacker/support role tags. The optimizer uses this to decide whether
+  /// to assign NP-firing turns to this servant (attacker) or treat it as a
+  /// pure buffer (support). Can be both.
+  Set<ServantRole> roles;
 
   OwnedServant({
     this.level = _defLevel,
@@ -47,8 +65,10 @@ class OwnedServant {
     this.fouAtk = _defFou,
     this.fouHp = _defFou,
     this.limitCount = _defLimitCount,
+    Set<ServantRole>? roles,
   })  : skillLevels = skillLevels ?? List.of(_defSkills),
-        appendLevels = appendLevels ?? List.of(_defAppends);
+        appendLevels = appendLevels ?? List.of(_defAppends),
+        roles = roles ?? {ServantRole.attacker, ServantRole.support};
 
   Map<String, dynamic> toJson() => {
         'level': level,
@@ -58,6 +78,7 @@ class OwnedServant {
         'fouAtk': fouAtk,
         'fouHp': fouHp,
         'limitCount': limitCount,
+        'roles': roles.map((r) => r.name).toList(),
       };
 
   factory OwnedServant.fromJson(Map<String, dynamic> j) => OwnedServant(
@@ -68,6 +89,7 @@ class OwnedServant {
         fouAtk: j['fouAtk'] as int? ?? _defFou,
         fouHp: j['fouHp'] as int? ?? _defFou,
         limitCount: j['limitCount'] as int? ?? _defLimitCount,
+        roles: _parseRoles(j['roles']),
       );
 
   OwnedServant copyWith({
@@ -78,6 +100,7 @@ class OwnedServant {
     int? fouAtk,
     int? fouHp,
     int? limitCount,
+    Set<ServantRole>? roles,
   }) =>
       OwnedServant(
         level: level ?? this.level,
@@ -87,6 +110,7 @@ class OwnedServant {
         fouAtk: fouAtk ?? this.fouAtk,
         fouHp: fouHp ?? this.fouHp,
         limitCount: limitCount ?? this.limitCount,
+        roles: roles ?? Set.of(this.roles),
       );
 }
 
@@ -222,6 +246,22 @@ class UserRoster {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+Set<ServantRole> _parseRoles(dynamic raw) {
+  if (raw == null) return {ServantRole.attacker, ServantRole.support};
+  final list = raw as List;
+  final result = <ServantRole>{};
+  for (final item in list) {
+    switch (item as String) {
+      case 'attacker':
+        result.add(ServantRole.attacker);
+      case 'support':
+        result.add(ServantRole.support);
+    }
+  }
+  // Default to both if the stored list was empty or contained unknown values.
+  return result.isEmpty ? {ServantRole.attacker, ServantRole.support} : result;
+}
 
 List<int>? _intList(dynamic raw) {
   if (raw == null) return null;

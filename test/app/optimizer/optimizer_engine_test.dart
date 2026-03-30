@@ -344,8 +344,7 @@ void main() async {
     test('runs without crash on single-wave quest with full roster', () async {
       final quest = db.gameData.questPhases[kSmokeQuestId]!;
 
-      // Five-servant roster — minimum needed to fill playerSlotsPerTeam=5.
-      // Uses the standard test roster so the enumerator generates real combos.
+      // Five-servant roster used to generate real frontline/backline combos.
       final roster = UserRoster(
         profileName: 'engine_test',
         servants: {
@@ -382,7 +381,7 @@ void main() async {
         quest: quest,
         roster: roster,
         maxClears: 5,
-        onProgress: (checked, cleared) => progressCallCount++,
+        onProgress: (checked, cleared, engineMs) => progressCallCount++,
         progressInterval: 10,
       );
 

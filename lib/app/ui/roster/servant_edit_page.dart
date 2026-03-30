@@ -35,6 +35,7 @@ class _ServantEditPageState extends State<ServantEditPage> {
   late final List<TextEditingController> _appends;
   late int _npLevel;
   late int _limitCount;
+  late Set<ServantRole> _roles;
 
   @override
   void initState() {
@@ -47,6 +48,17 @@ class _ServantEditPageState extends State<ServantEditPage> {
     _appends = s.appendLevels.map((v) => TextEditingController(text: v.toString())).toList();
     _npLevel = s.npLevel;
     _limitCount = s.limitCount;
+    if (widget.initial != null) {
+      _roles = Set.of(widget.initial!.roles);
+    } else {
+      // Smart default: infer from NP type so most servants are pre-tagged correctly.
+      final np = widget.svt.groupedNoblePhantasms[1]?.firstOrNull;
+      if (np == null || np.damageType == TdEffectFlag.support) {
+        _roles = {ServantRole.support};
+      } else {
+        _roles = {ServantRole.attacker};
+      }
+    }
   }
 
   @override
@@ -76,6 +88,7 @@ class _ServantEditPageState extends State<ServantEditPage> {
       appendLevels: _appends.map((c) => int.tryParse(c.text) ?? 0).toList(),
       fouAtk: int.tryParse(_fouAtk.text) ?? 1000,
       fouHp: int.tryParse(_fouHp.text) ?? 1000,
+      roles: Set.of(_roles),
     );
     widget.notifier.upsertServant(widget.svt.id, data);
     Navigator.pop(context);
@@ -130,6 +143,10 @@ class _ServantEditPageState extends State<ServantEditPage> {
 
             // NP Level
             _npSelector(),
+            const SizedBox(height: 16),
+
+            // Role tags
+            _roleSelector(),
             const SizedBox(height: 16),
 
             // Skill Levels
@@ -192,6 +209,35 @@ class _ServantEditPageState extends State<ServantEditPage> {
           ],
           selected: {_npLevel},
           onSelectionChanged: (s) => setState(() => _npLevel = s.first),
+        ),
+      ],
+    );
+  }
+
+  Widget _roleSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _label('Role'),
+        Wrap(
+          spacing: 8,
+          children: [
+            for (final role in ServantRole.values)
+              FilterChip(
+                label: Text(role == ServantRole.attacker ? 'Attacker' : 'Support'),
+                selected: _roles.contains(role),
+                onSelected: (selected) {
+                  setState(() {
+                    if (selected) {
+                      _roles.add(role);
+                    } else if (_roles.length > 1) {
+                      // Require at least one role to be selected.
+                      _roles.remove(role);
+                    }
+                  });
+                },
+              ),
+          ],
         ),
       ],
     );

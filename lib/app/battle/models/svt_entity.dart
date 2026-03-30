@@ -12,6 +12,12 @@ import 'package:chaldea/models/models.dart';
 import 'package:chaldea/utils/utils.dart';
 import 'ai.dart';
 
+/// Skill IDs that were fetched from Atlas Academy API but returned null
+/// (not found or network error). Prevents repeated HTTP requests for the
+/// same missing skill within one process lifetime.
+/// Subprocess workers each have their own Dart VM, so this is per-worker.
+final Set<int> _atlasSkillNotFound = {};
+
 class BattleServantData {
   static const npPityThreshold = 9900;
   static List<BuffAction> buffEffectivenessTypes = [BuffAction.buffRate, BuffAction.funcHpReduce];
@@ -123,6 +129,7 @@ class BattleServantData {
   // set with procAccumulationDamage(previousHp)
   // reset with resetAccumulationDamage (after use or after reflectionFunction buff is added)
   int _accumulationDamage = 0;
+
 
   // BattleServantData.Status status
   // NiceTd? td;
@@ -447,7 +454,14 @@ class BattleServantData {
       if (ascensionAdds != null) {
         for (final skillId in ascensionAdds) {
           BaseSkill? skill = db.gameData.baseSkills[skillId];
-          skill ??= await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+          if (skill == null && !_atlasSkillNotFound.contains(skillId)) {
+            skill = await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+            if (skill != null) {
+              db.gameData.baseSkills[skillId] = skill;
+            } else {
+              _atlasSkillNotFound.add(skillId);
+            }
+          }
           if (skill == null) {
             battleData.battleLogger.debug('Buff ID [$skillId}]: ${S.current.skill} [$skillId] ${S.current.not_found}');
             continue;
@@ -1793,7 +1807,14 @@ class BattleServantData {
           skillLv != null &&
           await buff.shouldActivateBuff(battleData, getTraits(addTraits: niceTd.getIndividuality()))) {
         BaseSkill? skill = db.gameData.baseSkills[skillId];
-        skill ??= await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+        if (skill == null && !_atlasSkillNotFound.contains(skillId)) {
+          skill = await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+          if (skill != null) {
+            db.gameData.baseSkills[skillId] = skill;
+          } else {
+            _atlasSkillNotFound.add(skillId);
+          }
+        }
         final replacementFunction = skill?.functions.firstOrNull;
         final selectedDataVal = replacementFunction?.svals.getOrNull(skillLv - 1);
         if (skill == null || replacementFunction == null || selectedDataVal == null) {
@@ -2339,7 +2360,14 @@ class BattleServantData {
         } else {
           final skillId = buff.param;
           skill = db.gameData.baseSkills[skillId];
-          skill ??= await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+          if (skill == null && !_atlasSkillNotFound.contains(skillId)) {
+            skill = await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+            if (skill != null) {
+              db.gameData.baseSkills[skillId] = skill;
+            } else {
+              _atlasSkillNotFound.add(skillId);
+            }
+          }
           if (skill == null) {
             battleData.battleLogger.debug(
               'Buff ID [${buff.buff.id}]: ${S.current.skill} [$skillId] ${S.current.not_found}',
@@ -2381,7 +2409,14 @@ class BattleServantData {
       if (await buff.shouldActivateBuff(battleData, selfTraits)) {
         final skillId = buff.param;
         BaseSkill? skill = db.gameData.baseSkills[skillId];
-        skill ??= await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+        if (skill == null && !_atlasSkillNotFound.contains(skillId)) {
+          skill = await showEasyLoading(() => AtlasApi.skill(skillId), mask: true);
+          if (skill != null) {
+            db.gameData.baseSkills[skillId] = skill;
+          } else {
+            _atlasSkillNotFound.add(skillId);
+          }
+        }
         if (skill == null) {
           battleData.battleLogger.debug(
             'Buff ID [${buff.buff.id}]: ${S.current.skill} [$skillId] ${S.current.not_found}',

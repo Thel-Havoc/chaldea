@@ -160,7 +160,43 @@ class CandidateConverter {
       }
     }
 
+    // Deduplicate: some variable dimensions produce identical turn sequences when
+    // irrelevant for a team (e.g. selfBatteryToT1 toggle when the attacker has
+    // no self-battery skill, or concentrateSupport when there are no single-ally
+    // support batteries). Filter before returning to avoid wasted simulations.
+    final seen = <String>{};
+    results.retainWhere((spec) => seen.add(_turnsKey(spec.turns)));
+
     return results;
+  }
+
+  /// Compact key encoding only [turns] — all specs from one [convert] call
+  /// share the same slotSpecs/MC, so only the action sequence can differ.
+  static String _turnsKey(List<TurnActions> turns) {
+    final buf = StringBuffer();
+    for (int i = 0; i < turns.length; i++) {
+      if (i > 0) buf.write('/');
+      final t = turns[i];
+      buf.write(t.npSlots.join(','));
+      buf.write('|');
+      for (final s in t.skills) {
+        buf.write(s.slotIndex);
+        buf.write(':');
+        buf.write(s.skillIndex);
+        buf.write(':');
+        buf.write(s.enemyTarget);
+        buf.write(':');
+        buf.write(s.allyTarget ?? -1);
+        buf.write(',');
+      }
+      if (t.orderChange != null) {
+        buf.write('|');
+        buf.write(t.orderChange!.onFieldSlot);
+        buf.write('>');
+        buf.write(t.orderChange!.backlineSlot);
+      }
+    }
+    return buf.toString();
   }
 
   // ---------------------------------------------------------------------------
@@ -198,6 +234,7 @@ class CandidateConverter {
         limitCount: owned.limitCount,
         ceId: candidate.playerCeIds.length > i ? candidate.playerCeIds[i] : null,
         isSupport: false,
+        isAttacker: owned.roles.contains(ServantRole.attacker),
       ));
     }
 
@@ -216,6 +253,7 @@ class CandidateConverter {
       limitCount: 4,
       ceId: candidate.supportCeId,
       isSupport: true,
+      isAttacker: false, // borrowed supports are never used as attackers
     );
 
     // Build ordered layout:
@@ -278,11 +316,11 @@ class CandidateConverter {
   // Attacker slot identification
   // ---------------------------------------------------------------------------
 
-  /// Returns frontline slot indices (0-2) whose servant has a damaging NP.
+  /// Returns frontline slot indices (0-2) whose servant is tagged as an attacker.
   List<int> _frontlineAttackerSlots(List<_SvtEntry> layout) {
     final result = <int>[];
     for (int i = 0; i < 3 && i < layout.length; i++) {
-      if (_role(layout[i].svt) != _Role.support) {
+      if (layout[i].isAttacker) {
         result.add(i);
       }
     }
@@ -874,14 +912,6 @@ class CandidateConverter {
     return result;
   }
 
-  /// Classifies a servant as AoE attacker, ST attacker, or support.
-  _Role _role(Servant svt) {
-    final np = svt.groupedNoblePhantasms[1]?.firstOrNull;
-    if (np == null) return _Role.support;
-    if (np.damageType == TdEffectFlag.attackEnemyAll) return _Role.aoeAttacker;
-    if (np.damageType == TdEffectFlag.attackEnemyOne) return _Role.stAttacker;
-    return _Role.support;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +931,9 @@ class _SvtEntry {
   final int limitCount;
   final int? ceId;
   final bool isSupport;
+  /// True if the player tagged this servant as an attacker in their roster.
+  /// Always false for the borrowed support slot.
+  final bool isAttacker;
 
   _SvtEntry({
     required this.svtId,
@@ -914,12 +947,7 @@ class _SvtEntry {
     required this.limitCount,
     this.ceId,
     required this.isSupport,
+    required this.isAttacker,
   });
 }
 
-/// Servant role for slot ordering purposes.
-enum _Role {
-  aoeAttacker, // slot priority 0 (frontline first)
-  stAttacker, // slot priority 1
-  support, // slot priority 2 (backline preferred)
-}

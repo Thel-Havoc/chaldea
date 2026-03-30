@@ -1,25 +1,25 @@
-/// BruteForcePass — exhaustive turn-assignment enumeration for non-battery skills.
+/// BruteForcePass — exhaustive turn-assignment enumeration (FUTURE — NOT YET ACTIVE).
 ///
-/// This is the slowest pass (potentially days). Where RulesPass places each
-/// non-battery, non-enumerated skill on T1 or T3 based on isTimeSensitive,
-/// BruteForcePass tries all combinations of {T1, T2, T3} for those skills
-/// (3^N variants per candidate, N = number of non-battery non-enumerated skills).
+/// This pass will use DIFFERENT logic from RulesPass. Where RulesPass places
+/// skills via the CandidateConverter heuristic (isTimeSensitive, battery rules,
+/// topological sort), BruteForcePass will enumerate all combinations of
+/// {T1, T2, T3} for non-battery non-enumerated skills (3^N variants per candidate,
+/// N = skills not already covered by RulesPass enumeration).
 ///
-/// This catches teams that only work when a 1-turn damage buff lands on a
-/// specific turn that the isTimeSensitive heuristic doesn't predict — e.g.
-/// Oberon S3 or Koyanskaya buffs that don't set Turn=1 in their svals.
+/// This catches teams that only clear when a 1-turn buff lands on a specific
+/// turn that the heuristic can't predict — e.g. Oberon S3 or Koyanskaya buffs
+/// whose svals don't set Turn=1 but whose effect is still turn-dependent.
 ///
-/// Current status: stub — returns an empty stream.
-/// The pass wiring is in place; implementation is deferred until the Rules pass
-/// has been validated against a wide enough set of nodes to establish which
-/// cases it misses.
+/// Current status: stub — NOT included in the default pass list.
+/// BruteForcePass falls into the same candidate-level dispatch path as RulesPass
+/// (any non-PatternPass does), so including it before it has its own spec-generation
+/// logic would just re-simulate every candidate a second time.
 ///
-/// Implementation plan:
-///   1. For each candidate, gather all non-battery non-enumerated schedulable skills
+/// Implementation plan (deferred until RulesPass is validated):
+///   1. For each candidate, gather non-battery non-enumerated schedulable skills
 ///   2. Enumerate all len(skills)^3 turn assignments {T1, T2, T3}
-///   3. For each assignment, build a TeamSpec (reusing CandidateConverter internals)
-///   4. Yield the spec — the engine deduplicates against RulesPass output before
-///      simulating, so only genuinely new assignments cost simulation time
+///   3. Build TeamSpecs (reusing CandidateConverter internals)
+///   4. Simulate only specs not already covered by RulesPass output
 library;
 
 import '../simulation/headless_runner.dart';

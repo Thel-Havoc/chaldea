@@ -18,6 +18,8 @@ public:
   explicit FlutterWindow(const flutter::DartProject &project);
   virtual ~FlutterWindow();
 
+  void SetWorkerMode(bool worker_mode) { worker_mode_ = worker_mode; }
+
 protected:
   // Win32Window:
   bool OnCreate() override;
@@ -31,6 +33,8 @@ protected:
 private:
   // The project to run.
   flutter::DartProject project_;
+
+  bool worker_mode_ = false;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;

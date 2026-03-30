@@ -222,10 +222,12 @@ class _ClearGroupTile extends StatelessWidget {
       return name + role;
     }).toList();
 
-    // CEs for NP-firing (attacker) slots only
-    final ceParts = (attackerSlots.toList()..sort())
-        .map((idx) => _ceName(slots.getOrNull(idx)?.equip1.id))
-        .toList();
+    // CEs for NP-firing (attacker) slots only, paired with servant names
+    final ceParts = (attackerSlots.toList()..sort()).map((idx) {
+      final svtName = _svtName(slots.getOrNull(idx)?.svtId);
+      final ceName = _ceName(slots.getOrNull(idx)?.equip1.id);
+      return '$svtName: $ceName';
+    }).toList();
 
     // Mystic Code name (null if no MC used)
     final mcId = group.records.first.battleData.formation.mysticCode.mysticCodeId;
@@ -258,11 +260,19 @@ class _ClearGroupTile extends StatelessWidget {
       ),
       isThreeLine: ceParts.isNotEmpty || mcName != null,
       trailing: const Icon(Icons.chevron_right),
-      onTap: () => Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => ClearGroupDetailPage(group: group),
-        ),
-      ),
+      onTap: () {
+        final wavePattern = RunScope.of(context)
+            .loadedPhase
+            ?.stages
+            .map((s) => s.enemies.length)
+            .join(' / ');
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) =>
+                ClearGroupDetailPage(group: group, wavePattern: wavePattern),
+          ),
+        );
+      },
     );
   }
 }

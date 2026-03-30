@@ -23,6 +23,66 @@ class RosterNotifier extends ChangeNotifier {
 
   UserRoster get roster => _roster;
 
+  /// All saved profile names, sorted alphabetically.
+  List<String> get profiles => _store.listProfiles();
+
+  /// Name of the currently active profile.
+  String get activeProfileName => _roster.profileName;
+
+  // -------------------------------------------------------------------------
+  // Profile management
+  // -------------------------------------------------------------------------
+
+  /// Loads and activates a different profile. No-op if already active.
+  void switchProfile(String name) {
+    if (name == _roster.profileName) return;
+    _roster = _store.loadProfile(name) ?? _roster;
+    notifyListeners();
+  }
+
+  /// Creates a new empty profile, switches to it, and saves it.
+  /// Throws [ArgumentError] if a profile with that name already exists.
+  void createNewProfile(String name) {
+    _roster = _store.createProfile(name);
+    notifyListeners();
+  }
+
+  /// Renames the active profile.
+  /// Throws [ArgumentError] if a profile with [newName] already exists.
+  void renameCurrentProfile(String newName) {
+    _roster = _store.renameProfile(_roster, newName);
+    notifyListeners();
+  }
+
+  /// Deletes the active profile and switches to the next available one.
+  /// If this is the only profile, recreates an empty 'default' profile.
+  void deleteCurrentProfile() {
+    final toDelete = _roster.profileName;
+    final remaining = _store.listProfiles()..remove(toDelete);
+    _store.deleteProfile(toDelete);
+    if (remaining.isEmpty) {
+      _roster = _store.createProfile(_defaultProfile);
+    } else {
+      _roster = _store.loadProfile(remaining.first) ??
+          UserRoster(profileName: remaining.first);
+    }
+    notifyListeners();
+  }
+
+  /// Writes the active profile as JSON to [targetPath].
+  void exportCurrentProfile(String targetPath) {
+    _store.exportProfile(_roster, targetPath);
+  }
+
+  /// Saves [imported] into the profiles directory (overwriting if the file
+  /// already exists) and switches to it. Use this after the UI has resolved
+  /// any name collision (overwrite or rename).
+  void saveImported(UserRoster imported) {
+    _store.saveProfile(imported);
+    _roster = imported;
+    notifyListeners();
+  }
+
   // -------------------------------------------------------------------------
   // Servants
   // -------------------------------------------------------------------------

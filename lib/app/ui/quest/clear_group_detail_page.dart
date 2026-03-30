@@ -19,7 +19,8 @@ import 'results_screen.dart';
 
 class ClearGroupDetailPage extends StatefulWidget {
   final GroupedResult group;
-  const ClearGroupDetailPage({super.key, required this.group});
+  final String? wavePattern;
+  const ClearGroupDetailPage({super.key, required this.group, this.wavePattern});
 
   @override
   State<ClearGroupDetailPage> createState() => _ClearGroupDetailPageState();
@@ -29,9 +30,10 @@ class _ClearGroupDetailPageState extends State<ClearGroupDetailPage> {
   @override
   Widget build(BuildContext context) {
     final slots = widget.group.slots;
+    final activeSlots = widget.group.activeSlots.toList()..sort();
 
-    // Title: on-field servant names (slots 0–2)
-    final title = List.generate(3, (i) {
+    // Title: all active servant names
+    final title = activeSlots.map((i) {
       final svtId = slots.getOrNull(i)?.svtId;
       if (svtId == null || svtId == 0) return null;
       return db.gameData.servantsById[svtId]?.lName.l ?? 'Svt $svtId';
@@ -42,6 +44,12 @@ class _ClearGroupDetailPageState extends State<ClearGroupDetailPage> {
     final mcName = (mcId != null && mcId != 0)
         ? (db.gameData.mysticCodes[mcId]?.lName.l ?? 'MC $mcId')
         : null;
+
+    // Build AppBar bottom line: wave pattern and/or MC name
+    final appBarLines = [
+      if (widget.wavePattern != null) 'Waves: ${widget.wavePattern}',
+      if (mcName != null) 'MC: $mcName',
+    ];
 
     // Sort within group: guaranteed first, then fewest presses, then turns
     final sorted = [...widget.group.records]..sort((a, b) {
@@ -56,27 +64,91 @@ class _ClearGroupDetailPageState extends State<ClearGroupDetailPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(title.isEmpty ? 'Team Details' : title),
-        bottom: mcName != null
-            ? PreferredSize(
-                preferredSize: const Size.fromHeight(24),
+        bottom: appBarLines.isEmpty
+            ? null
+            : PreferredSize(
+                preferredSize: Size.fromHeight(appBarLines.length * 20.0 + 6),
                 child: Padding(
                   padding: const EdgeInsets.only(bottom: 6),
-                  child: Text(
-                    'MC: $mcName',
-                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                  child: Column(
+                    children: appBarLines
+                        .map((line) => Text(
+                              line,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.white70),
+                            ))
+                        .toList(),
                   ),
                 ),
-              )
-            : null,
+              ),
       ),
-      body: ListView.builder(
-        padding: const EdgeInsets.all(12),
-        itemCount: sorted.length,
-        itemBuilder: (context, i) => _SpecCard(
-          record: sorted[i],
-          index: i + 1,
-          total: sorted.length,
-        ),
+      body: Column(
+        children: [
+          _TeamSection(group: widget.group),
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: sorted.length,
+              itemBuilder: (context, i) => _SpecCard(
+                record: sorted[i],
+                index: i + 1,
+                total: sorted.length,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _TeamSection — shows active servants with roles and CEs
+// ---------------------------------------------------------------------------
+
+class _TeamSection extends StatelessWidget {
+  final GroupedResult group;
+  const _TeamSection({required this.group});
+
+  static String _svtName(int? svtId) {
+    if (svtId == null || svtId == 0) return '?';
+    return db.gameData.servantsById[svtId]?.lName.l ?? 'Svt $svtId';
+  }
+
+  static String _ceName(int? ceId) {
+    if (ceId == null || ceId == 0) return 'No CE';
+    return db.gameData.craftEssencesById[ceId]?.lName.l ?? 'CE $ceId';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final slots = group.slots;
+    final activeSlots = group.activeSlots.toList()..sort();
+    final attackerSlots = group.attackerSlots;
+    final textTheme = Theme.of(context).textTheme;
+
+    final rows = activeSlots.map((i) {
+      final slot = slots.getOrNull(i);
+      final svtName = _svtName(slot?.svtId);
+      final ceName = _ceName(slot?.equip1.id);
+      final isFriend = slot?.supportType == SupportSvtType.friend;
+      final role = isFriend
+          ? '[FRIEND]'
+          : attackerSlots.contains(i)
+              ? '[ATK]'
+              : '[SUP]';
+      return '$svtName $role  ·  $ceName';
+    }).toList();
+
+    return Container(
+      width: double.infinity,
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: rows
+            .map((line) => Text(line, style: textTheme.bodySmall))
+            .toList(),
       ),
     );
   }
@@ -312,7 +384,16 @@ String _describeSkill(BattleRecordData action, BattleTeamFormation formation,
   final skillName =
       skillId != null ? db.gameData.baseSkills[skillId]?.dispName : null;
 
-  return skillName != null ? '$svtDisplay $label: $skillName' : '$svtDisplay $label';
+  final base = skillName != null ? '$svtDisplay $label: $skillName' : '$svtDisplay $label';
+
+  // Show target if the skill was cast on a different ally
+  final playerTarget = action.options.playerTarget;
+  if (playerTarget != svtIdx) {
+    final targetName = _svtNameForSlot(formation, playerTarget, remap);
+    return '$base → $targetName';
+  }
+
+  return base;
 }
 
 // ---------------------------------------------------------------------------

@@ -305,11 +305,11 @@ class HeadlessRunner {
           // Mystic Code skill
           await _battleData.activateMysticCodeSkill(skillAction.skillIndex);
         } else {
-          // Set target indices before activation for targeted skills
+          // Set target indices before activation for targeted skills.
+          // Always stamp playerTargetIndex so the recorded value reliably reflects
+          // the intended target (caster's slot by default, or an explicit ally target).
           _battleData.enemyTargetIndex = skillAction.enemyTarget;
-          if (skillAction.allyTarget != null) {
-            _battleData.playerTargetIndex = skillAction.allyTarget!;
-          }
+          _battleData.playerTargetIndex = skillAction.allyTarget ?? skillAction.slotIndex;
           await _battleData.activateSvtSkill(skillAction.slotIndex, skillAction.skillIndex);
         }
         // Discard the undo snapshot and battle records — we never replay or

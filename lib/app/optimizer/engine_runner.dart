@@ -158,6 +158,10 @@ class EngineRunner {
   /// Set when the isolate sends its 'ready' message.
   SendPort? _controlPort;
 
+  /// True if [stop()] was called before the engine isolate sent its 'ready'
+  /// message. The stop signal is forwarded as soon as the control port arrives.
+  bool _stopRequested = false;
+
   EngineRunner({
     required this.quest,
     required this.roster,
@@ -237,6 +241,7 @@ class EngineRunner {
   /// Has no effect after the engine has already finished or if running in
   /// direct (test) mode.
   void stop() {
+    _stopRequested = true;
     _controlPort?.send({'type': 'stop'});
   }
 
@@ -244,6 +249,7 @@ class EngineRunner {
     switch (msg['type'] as String?) {
       case 'ready':
         _controlPort = msg['controlPort'] as SendPort;
+        if (_stopRequested) _controlPort!.send({'type': 'stop'});
       case 'progress':
         onProgress?.call(msg['checked'] as int, msg['cleared'] as int,
             (msg['engineMs'] as int?) ?? 0);

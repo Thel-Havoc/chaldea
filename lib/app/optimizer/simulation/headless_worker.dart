@@ -311,6 +311,38 @@ Future<void> _workerEntry(List<Object?> args) async {
           replyPort.send({'ok': false, 'error': '$e\n$st'});
         }
 
+      case 'runShareData':
+        // SharedPass dispatch — replay a community BattleShareData with
+        // player stats already substituted by the engine isolate.
+        final replyPort = msg['reply'] as SendPort;
+        try {
+          final questJson = msg['questJson'] as Map?;
+          if (questJson != null) {
+            final quest =
+                QuestPhase.fromJson(Map<String, dynamic>.from(questJson));
+            runner = HeadlessRunner(quest: quest);
+          }
+          if (runner == null) {
+            replyPort.send({'ok': false, 'error': 'No quest set'});
+            break;
+          }
+          final shareDataStr = msg['shareDataStr'] as String;
+          final shareData = BattleShareData.parse(shareDataStr);
+          if (shareData == null) {
+            replyPort.send({'ok': false, 'error': 'Failed to parse share data'});
+            break;
+          }
+          final r = await runner.runFromShareData(shareData);
+          replyPort.send({
+            'ok': true,
+            'outcome': r.outcome.index,
+            'turns': r.totalTurns,
+            'error': r.errorMessage,
+          });
+        } catch (e, st) {
+          replyPort.send({'ok': false, 'error': '$e\n$st'});
+        }
+
       case 'stop':
         port.close();
         return;
@@ -469,6 +501,40 @@ class HeadlessWorker {
               RunRecord.fromJson(Map<String, dynamic>.from(m as Map)))
           .toList(),
     );
+  }
+
+  /// Replays a community [BattleShareData] (with player stats already
+  /// substituted) on this worker. Used by SharedPass.
+  Future<SimulationResult> runShareData(BattleShareData shareData) async {
+    await _ensureStarted();
+
+    if (_directRunner != null) {
+      return _directRunner!.runFromShareData(shareData);
+    }
+
+    final replyPort = ReceivePort();
+    _workerPort!.send({
+      'type': 'runShareData',
+      'questJson': _questSent ? null : quest.toJson(),
+      'shareDataStr': shareData.toDataV2(),
+      'reply': replyPort.sendPort,
+    });
+    _questSent = true;
+
+    final reply = await replyPort.first as Map;
+    replyPort.close();
+
+    if (reply['ok'] != true) {
+      return SimulationResult.error(reply['error'] as String? ?? 'unknown');
+    }
+    final index = reply['outcome'] as int;
+    final turns = reply['turns'] as int;
+    final err = reply['error'] as String?;
+    return switch (index) {
+      0 => SimulationResult.cleared(turns),
+      1 => SimulationResult.notCleared(turns),
+      _ => SimulationResult.error(err ?? 'unknown'),
+    };
   }
 
   /// Starts the background Isolate proactively without running a spec.
@@ -713,6 +779,31 @@ class HeadlessWorkerProcess {
     );
   }
 
+  /// Replays a community [BattleShareData] (with player stats already
+  /// substituted) on this worker. Used by SharedPass.
+  Future<SimulationResult> runShareData(BattleShareData shareData) async {
+    if (_directRunner != null) {
+      return _directRunner!.runFromShareData(shareData);
+    }
+    final reply = await _sendAndReceive({
+      'type': 'runShareData',
+      'questJson': _questSent ? null : quest.toJson(),
+      'shareDataStr': shareData.toDataV2(),
+    });
+    _questSent = true;
+    if (reply['ok'] != true) {
+      return SimulationResult.error(reply['error'] as String? ?? 'unknown');
+    }
+    final index = reply['outcome'] as int;
+    final turns = reply['turns'] as int;
+    final err = reply['error'] as String?;
+    return switch (index) {
+      0 => SimulationResult.cleared(turns),
+      1 => SimulationResult.notCleared(turns),
+      _ => SimulationResult.error(err ?? 'unknown'),
+    };
+  }
+
   void dispose() {
     _stopSent = true;
     _stdoutSub?.cancel();
@@ -849,6 +940,49 @@ Future<void> runWorkerProcess(List<String> args) async {
               'turns': r.totalTurns,
               'error': r.errorMessage,
             }));
+          }
+        } catch (e, st) {
+          stdout.writeln(jsonEncode({
+            'type': 'result',
+            'ok': false,
+            'error': '$e\n$st',
+          }));
+        }
+        await stdout.flush();
+
+      case 'runShareData':
+        try {
+          final questJson = msg['questJson'] as Map?;
+          if (questJson != null) {
+            runner = HeadlessRunner(
+                quest: QuestPhase.fromJson(
+                    Map<String, dynamic>.from(questJson)));
+          }
+          if (runner == null) {
+            stdout.writeln(jsonEncode({
+              'type': 'result',
+              'ok': false,
+              'error': 'No quest set',
+            }));
+          } else {
+            final shareDataStr = msg['shareDataStr'] as String;
+            final shareData = BattleShareData.parse(shareDataStr);
+            if (shareData == null) {
+              stdout.writeln(jsonEncode({
+                'type': 'result',
+                'ok': false,
+                'error': 'Failed to parse share data',
+              }));
+            } else {
+              final r = await runner.runFromShareData(shareData);
+              stdout.writeln(jsonEncode({
+                'type': 'result',
+                'ok': true,
+                'outcome': r.outcome.index,
+                'turns': r.totalTurns,
+                'error': r.errorMessage,
+              }));
+            }
           }
         } catch (e, st) {
           stdout.writeln(jsonEncode({

@@ -18,7 +18,7 @@ class McListPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final notifier = RosterScope.of(context);
     final allMcs = db.gameData.mysticCodes.values.toList()
-      ..sort((a, b) => a.id.compareTo(b.id));
+      ..sort((a, b) => b.id.compareTo(a.id));
 
     return ListView.builder(
       itemCount: allMcs.length,

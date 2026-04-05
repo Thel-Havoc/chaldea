@@ -162,6 +162,17 @@ class HeadlessWorkerPool {
     }
   }
 
+  /// Replays a community [BattleShareData] (with player stats already
+  /// substituted) on the next available worker. Used by SharedPass.
+  Future<SimulationResult> runShareData(BattleShareData shareData) async {
+    final worker = await _acquire();
+    try {
+      return await worker.runShareData(shareData);
+    } finally {
+      _release(worker);
+    }
+  }
+
   /// Shuts down all worker isolates.
   void dispose() {
     _disposed = true;

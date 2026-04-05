@@ -11,14 +11,55 @@ import 'dart:math' show max;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:chaldea/app/tools/gamedata_loader.dart';
 import 'package:chaldea/models/models.dart';
 
 import '../../optimizer/roster/user_roster.dart';
 import '../roster/roster_notifier.dart';
+import 'brute_force_debug_tab.dart';
+import 'pattern_debug_tab.dart';
 import 'run_notifier.dart';
+import 'shared_debug_tab.dart';
 
 class DebugTab extends StatelessWidget {
   const DebugTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 4,
+      child: Column(
+        children: [
+          const TabBar(
+            tabs: [
+              Tab(text: 'System'),
+              Tab(text: 'Shared'),
+              Tab(text: 'Pattern'),
+              Tab(text: 'Brute Force'),
+            ],
+          ),
+          const Expanded(
+            child: TabBarView(
+              children: [
+                _SystemTab(),
+                SharedDebugTab(),
+                PatternDebugTab(),
+                BruteForceDebugTab(),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// _SystemTab — the original debug report content
+// ---------------------------------------------------------------------------
+
+class _SystemTab extends StatelessWidget {
+  const _SystemTab();
 
   @override
   Widget build(BuildContext context) {
@@ -60,6 +101,48 @@ class DebugTab extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
+        // Pass enable toggles
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          child: Row(
+            children: [
+              Text('Passes:', style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(width: 12),
+              for (final (label, key, enabled) in [
+                ('Shared',      'shared',     run.enableSharedPass),
+                ('Pattern',     'pattern',    run.enablePatternPass),
+                ('Rules',       'rules',      run.enableRulesPass),
+                ('Brute Force', 'bruteForce', run.enableBruteForcePass),
+              ]) ...[
+                FilterChip(
+                  label: Text(label),
+                  selected: enabled,
+                  onSelected: run.isRunning
+                      ? null
+                      : (v) => run.setPassEnabled(key, v),
+                  visualDensity: VisualDensity.compact,
+                ),
+                const SizedBox(width: 8),
+              ],
+          if (run.enableBruteForcePass) ...[
+            const SizedBox(width: 4),
+            FilterChip(
+              label: const Text('Dry Run'),
+              selected: run.dryRunBruteForce,
+              selectedColor: Colors.orange.withValues(alpha: 0.2),
+              checkmarkColor: Colors.orange,
+              onSelected: run.isRunning
+                  ? null
+                  : (v) => run.setDryRunBruteForce(v),
+              visualDensity: VisualDensity.compact,
+            ),
+          ],
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        const _GameDataSection(),
+        const Divider(height: 1),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           child: Row(
@@ -98,12 +181,84 @@ class DebugTab extends StatelessWidget {
       ],
     );
   }
+} // end _SystemTab
 
-  // ---------------------------------------------------------------------------
-  // Report builder
-  // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// _GameDataSection — shows current game data version + manual update button
+// ---------------------------------------------------------------------------
 
-  static String _buildReport(RunNotifier run, UserRoster roster) {
+class _GameDataSection extends StatefulWidget {
+  const _GameDataSection();
+
+  @override
+  State<_GameDataSection> createState() => _GameDataSectionState();
+}
+
+class _GameDataSectionState extends State<_GameDataSection> {
+  bool _checking = false;
+  String? _status;
+
+  Future<void> _check() async {
+    setState(() {
+      _checking = true;
+      _status = null;
+    });
+    try {
+      final updated =
+          await GameDataLoader.instance.reload(offline: false, silent: false);
+      if (!mounted) return;
+      if (updated != null) {
+        db.gameData = updated;
+        setState(() => _status = 'Updated to ${updated.version.utc}');
+      } else {
+        setState(
+            () => _status = 'Already up to date (${db.gameData.version.utc})');
+      }
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Game data: ${db.gameData.version.utc}',
+                    style: textTheme.bodySmall),
+                if (_status != null)
+                  Text(_status!, style: textTheme.bodySmall),
+              ],
+            ),
+          ),
+          TextButton.icon(
+            icon: _checking
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.system_update_alt, size: 16),
+            label: const Text('Check for Updates'),
+            onPressed: _checking ? null : _check,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Report builder (free function — was a static method of DebugTab)
+// ---------------------------------------------------------------------------
+
+String _buildReport(RunNotifier run, UserRoster roster) {
     final svtSpecCounts = run.svtSpecsChecked;
     final svtClearCounts = run.svtClears;
     final buf = StringBuffer();
@@ -328,7 +483,7 @@ class DebugTab extends StatelessWidget {
     return buf.toString();
   }
 
-  static void _writeServantLine(
+void _writeServantLine(
     StringBuffer buf,
     int svtId,
     OwnedServant owned, {
@@ -379,7 +534,7 @@ class DebugTab extends StatelessWidget {
   // Formatting helpers
   // ---------------------------------------------------------------------------
 
-  static String _fmtDuration(Duration d) {
+String _fmtDuration(Duration d) {
     final h = d.inHours;
     final m = d.inMinutes.remainder(60);
     final s = d.inSeconds.remainder(60);
@@ -388,7 +543,7 @@ class DebugTab extends StatelessWidget {
   }
 
   /// Formats [n] with comma separators: 1234567 → "1,234,567".
-  static String _fmtN(int n) {
+String _fmtN(int n) {
     final s = n.toString();
     final buf = StringBuffer();
     for (int i = 0; i < s.length; i++) {
@@ -398,5 +553,4 @@ class DebugTab extends StatelessWidget {
     return buf.toString();
   }
 
-  static String _pad(int n) => n.toString().padLeft(2, '0');
-}
+String _pad(int n) => n.toString().padLeft(2, '0');

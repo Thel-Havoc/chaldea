@@ -140,7 +140,7 @@ class Enumerator {
 
     for (final supportId in _sortedSupportIds()) {
       for (final mcChoice in mcChoices) {
-        final ocSlots = _hasOrderChange(mcChoice?.key) ? 1 : 0;
+        final ocSlots = _hasOrderChange(mcChoice.key) ? 1 : 0;
 
         for (final frontlineCombo in frontlineCombos) {
           // Extra backline slots needed for servants that depart the field
@@ -165,8 +165,8 @@ class Enumerator {
                 playerSvtIds: allPlayerIds,
                 playerCeIds: ceAssignment,
                 supportCeId: null, // support CE not controlled by us
-                mysticCodeId: mcChoice?.key,
-                mysticCodeLevel: mcChoice?.value ?? 10,
+                mysticCodeId: mcChoice.key,
+                mysticCodeLevel: mcChoice.value,
               );
             }
           }
@@ -243,9 +243,10 @@ class Enumerator {
         .toList();
   }
 
-  /// Returns mystic code choices from the roster, plus null (no MC).
+  /// Returns mystic code choices from the roster.
   /// Plug Suit (id 210) is tried first since Order Change is critical.
-  List<MapEntry<int, int>?> _mysticCodeChoices() {
+  /// Every match requires an equipped MC; there is no "no MC" variant.
+  List<MapEntry<int, int>> _mysticCodeChoices() {
     const plugSuitId = 210;
     final entries = roster.mysticCodes.entries.toList()
       ..sort((a, b) {
@@ -253,10 +254,7 @@ class Enumerator {
         if (b.key == plugSuitId) return 1;
         return 0;
       });
-    return [
-      ...entries.map((e) => MapEntry(e.key, e.value)),
-      null, // no MC
-    ];
+    return entries.map((e) => MapEntry(e.key, e.value)).toList();
   }
 
   // -------------------------------------------------------------------------
@@ -313,6 +311,98 @@ class Enumerator {
   }
 
   // -------------------------------------------------------------------------
+  // Servant-combo enumeration (no CE assignment)
+  // -------------------------------------------------------------------------
+
+  /// Yields all servant+MC combinations without CE assignment, for the Rules Pass.
+  ///
+  /// Enforces Rules Pass servant role constraints:
+  ///   • Single-attacker compositions (yielded first):
+  ///       slot 0 = attacker-tagged servant (or both-tagged)
+  ///       slot 1 = support-tagged servant (or both-tagged)
+  ///   • Double-attacker compositions (yielded second):
+  ///       both slots = attacker-tagged servants (or both-tagged)
+  ///   Servants with no role tag are excluded from all compositions.
+  ///
+  ///   • Backline (OC slot + field-departure slots): support-tagged only (or both-tagged).
+  ///
+  /// All single-attacker teams across all support/MC/backline variants are
+  /// yielded before the first double-attacker team.
+  ///
+  /// Each yielded [CandidateTeam] has all [CandidateTeam.playerCeIds] set to null.
+  /// Used by [RulesPassCandidateSource] so it can apply its own CE selection
+  /// strategy (smart Buster min-charge / Arts cascade) without duplicating the
+  /// servant ordering and combo generation logic here.
+  ///
+  /// The existing [candidates] method (greedy CE assignment) is unchanged and
+  /// continues to be used by [BruteForcePassCandidateSource].
+  Iterable<CandidateTeam> servantCombos() sync* {
+    final allSorted = _sortedServantIds();
+    final mcChoices = _mysticCodeChoices();
+    final supportIds = _sortedSupportIds();
+
+    // Role pools — both-tagged servants appear in both lists.
+    final attackerPool = allSorted
+        .where((id) => roster.servants[id]!.roles.contains(ServantRole.attacker))
+        .toList();
+    final supportPool = allSorted
+        .where((id) => roster.servants[id]!.roles.contains(ServantRole.support))
+        .toList();
+
+    // Phase 1 — single-attacker frontline pairs: one from each pool.
+    // Phase 2 — double-attacker frontline pairs: two from attackerPool.
+    // (both-tagged+both-tagged will appear in both phases; cross-run dedup
+    // in the engine handles any redundancy.)
+    final singleAttackerFrontlines = [
+      for (final a in attackerPool)
+        for (final s in supportPool)
+          if (a != s) [a, s],
+    ];
+    final doubleAttackerFrontlines = List<List<int>>.of(
+      _combinations(attackerPool, 2),
+    );
+
+    for (final frontlineCombo in [
+      ...singleAttackerFrontlines,
+      ...doubleAttackerFrontlines,
+    ]) {
+      final departures = _fieldDepartureCount(frontlineCombo);
+
+      // Backline is restricted to support-tagged servants not already in frontline.
+      final backlinePool = supportPool
+          .where((id) => !frontlineCombo.contains(id))
+          .toList();
+
+      for (final supportId in supportIds) {
+        for (final mcChoice in mcChoices) {
+          final ocSlots = _hasOrderChange(mcChoice.key) ? 1 : 0;
+          final backlineSize = ocSlots + departures;
+
+          // Use however many support servants are available, up to the ideal
+          // backlineSize. When fewer are available (e.g. Arash + Plug Suit with
+          // only 1 remaining support), we still generate a candidate — the
+          // simulator tries it and skips any OC/replacement that can't fire.
+          final effectiveBacklineSize = backlineSize.clamp(0, backlinePool.length);
+          final backlineCombos = effectiveBacklineSize > 0
+              ? _combinations(backlinePool, effectiveBacklineSize)
+              : [<int>[]];
+
+          for (final backlineCombo in backlineCombos) {
+            final allPlayerIds = [...frontlineCombo, ...backlineCombo];
+            yield CandidateTeam(
+              supportSvtId: supportId,
+              playerSvtIds: allPlayerIds,
+              playerCeIds: List.filled(allPlayerIds.length, null),
+              mysticCodeId: mcChoice.key,
+              mysticCodeLevel: mcChoice.value,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Combination generation
   // -------------------------------------------------------------------------
 
@@ -340,16 +430,73 @@ class Enumerator {
       mcId != null && _kOrderChangeMcIds.contains(mcId);
 
   /// Returns the number of extra backline slots needed for servants in
-  /// [frontlineSvtIds] that will depart the field during the battle
-  /// (e.g. Arash whose NP kills him, Chen Gong who sacrifices an ally).
+  /// [frontlineSvtIds] that will unconditionally remove themselves from the
+  /// field during the battle.
   ///
   /// Each departing servant needs one replacement in the backline, otherwise
   /// the empty slot wastes a field position for the remainder of the fight.
   ///
-  /// TODO: implement departure detection by scanning servant NPs and skills
-  /// for self-death, ally-sacrifice, or field-swap functions. For now returns
-  /// 0 because no current roster servants have departure mechanics.
-  int _fieldDepartureCount(List<int> frontlineSvtIds) => 0;
+  /// Detects three coding patterns:
+  ///   (a) NP: FuncType.forceInstantDeath targeting self — Arash.
+  ///   (b) NP: FuncType.instantDeath targeting self with ForceSelfInstantDeath=1
+  ///       in DataVals (see instant_death.dart:25) — also Arash-style servants.
+  ///   (c) NP or skill: FuncType.moveToLastSubmember targeting self — Miss Crane
+  ///       (NP) and Chloe (Skill 2 via additionalSkillId).
+  ///
+  /// Probabilistic self-death and ally-sacrifice (Chen Gong) are intentionally
+  /// excluded — they're too situational to guarantee a backline slot is freed.
+  int _fieldDepartureCount(List<int> frontlineSvtIds) {
+    int count = 0;
+    for (final svtId in frontlineSvtIds) {
+      final svt = db.gameData.servantsById[svtId];
+      if (svt == null) continue;
+      if (_hasGuaranteedFieldDeparture(svt)) count++;
+    }
+    return count;
+  }
+
+  /// True if [svt] will unconditionally remove itself from the field
+  /// via NP or skill during a normal farming sequence.
+  bool _hasGuaranteedFieldDeparture(Servant svt) {
+    // --- NP functions ---
+    final nps = svt.groupedNoblePhantasms[1] ?? [];
+    for (final np in nps) {
+      if (_functionListHasDeparture(np.functions)) return true;
+    }
+
+    // --- Skill functions (including additionalSkillId references) ---
+    for (final skill in svt.skills) {
+      if (_functionListHasDeparture(skill.functions)) return true;
+      // Chloe's Skill 2 triggers departure via an additionalSkillId secondary
+      // skill rather than a direct function — resolve and check it too.
+      final addIds = skill.script?.additionalSkillId;
+      if (addIds != null) {
+        for (final addId in addIds) {
+          if (addId == 0) continue;
+          final addSkill = db.gameData.baseSkills[addId];
+          if (addSkill != null && _functionListHasDeparture(addSkill.functions)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /// True if [functions] contains any guaranteed self-removal effect.
+  static bool _functionListHasDeparture(List<NiceFunction> functions) {
+    for (final func in functions) {
+      if (func.funcTargetType != FuncTargetType.self) continue;
+      if (func.funcType == FuncType.forceInstantDeath) return true;
+      if (func.funcType == FuncType.moveToLastSubmember) return true;
+      if (func.funcType == FuncType.instantDeath &&
+          (func.svals.firstOrNull?.ForceSelfInstantDeath ?? 0) == 1) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   // -------------------------------------------------------------------------
   // Game data helpers

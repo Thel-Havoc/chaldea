@@ -17,6 +17,11 @@ class RosterScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final roster = RosterScope.of(context).roster;
+    final svtCount = roster.servants.length;
+    final ceCount = roster.craftEssences.length;
+    final mcCount = roster.mysticCodes.length;
+
     return Column(
       children: [
         const _ProfileHeader(),
@@ -24,15 +29,15 @@ class RosterScreen extends StatelessWidget {
           child: DefaultTabController(
             length: 3,
             child: Column(
-              children: const [
+              children: [
                 TabBar(
                   tabs: [
-                    Tab(text: 'Servants'),
-                    Tab(text: 'Craft Essences'),
-                    Tab(text: 'Mystic Codes'),
+                    Tab(text: 'Servants ($svtCount)'),
+                    Tab(text: 'CEs ($ceCount)'),
+                    Tab(text: 'Mystic Codes ($mcCount)'),
                   ],
                 ),
-                Expanded(
+                const Expanded(
                   child: TabBarView(
                     children: [
                       ServantListPage(),
@@ -146,35 +151,37 @@ class _ProfileHeader extends StatelessWidget {
     final ctrl = TextEditingController();
     showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New Profile'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Profile name'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              final name = ctrl.text.trim();
-              if (!_validName(name)) {
-                _showError(ctx, _nameError);
-                return;
-              }
-              try {
-                notifier.createNewProfile(name);
-                Navigator.pop(ctx);
-              } on ArgumentError catch (e) {
-                _showError(ctx, e.message as String);
-              }
-            },
-            child: const Text('Create'),
+      builder: (ctx) {
+        void submit() {
+          final name = ctrl.text.trim();
+          if (!_validName(name)) {
+            _showError(ctx, _nameError);
+            return;
+          }
+          try {
+            notifier.createNewProfile(name);
+            Navigator.pop(ctx);
+          } on ArgumentError catch (e) {
+            _showError(ctx, e.message as String);
+          }
+        }
+
+        return AlertDialog(
+          title: const Text('New Profile'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: 'Profile name'),
+            onSubmitted: (_) => submit(),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(onPressed: submit, child: const Text('Create')),
+          ],
+        );
+      },
     );
   }
 
@@ -188,35 +195,37 @@ class _ProfileHeader extends StatelessWidget {
         TextSelection(baseOffset: 0, extentOffset: ctrl.text.length);
     showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Rename Profile'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'New name'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              final name = ctrl.text.trim();
-              if (!_validName(name)) {
-                _showError(ctx, _nameError);
-                return;
-              }
-              try {
-                notifier.renameCurrentProfile(name);
-                Navigator.pop(ctx);
-              } on ArgumentError catch (e) {
-                _showError(ctx, e.message as String);
-              }
-            },
-            child: const Text('Rename'),
+      builder: (ctx) {
+        void submit() {
+          final name = ctrl.text.trim();
+          if (!_validName(name)) {
+            _showError(ctx, _nameError);
+            return;
+          }
+          try {
+            notifier.renameCurrentProfile(name);
+            Navigator.pop(ctx);
+          } on ArgumentError catch (e) {
+            _showError(ctx, e.message as String);
+          }
+        }
+
+        return AlertDialog(
+          title: const Text('Rename Profile'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: 'New name'),
+            onSubmitted: (_) => submit(),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(onPressed: submit, child: const Text('Rename')),
+          ],
+        );
+      },
     );
   }
 
@@ -368,40 +377,42 @@ class _ProfileHeader extends StatelessWidget {
         TextSelection(baseOffset: 0, extentOffset: ctrl.text.length);
     showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Save As'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'New profile name'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              final name = ctrl.text.trim();
-              if (!_validName(name)) {
-                _showError(ctx, _nameError);
-                return;
-              }
-              if (notifier.profiles.contains(name)) {
-                _showError(ctx, 'A profile named "$name" already exists.');
-                return;
-              }
-              notifier.saveImported(imported.copyWith(profileName: name));
-              Navigator.pop(ctx);
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Imported as "$name"')),
-                );
-              }
-            },
-            child: const Text('Save'),
+      builder: (ctx) {
+        void submit() {
+          final name = ctrl.text.trim();
+          if (!_validName(name)) {
+            _showError(ctx, _nameError);
+            return;
+          }
+          if (notifier.profiles.contains(name)) {
+            _showError(ctx, 'A profile named "$name" already exists.');
+            return;
+          }
+          notifier.saveImported(imported.copyWith(profileName: name));
+          Navigator.pop(ctx);
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Imported as "$name"')),
+            );
+          }
+        }
+
+        return AlertDialog(
+          title: const Text('Save As'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: 'New profile name'),
+            onSubmitted: (_) => submit(),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(onPressed: submit, child: const Text('Save')),
+          ],
+        );
+      },
     );
   }
 

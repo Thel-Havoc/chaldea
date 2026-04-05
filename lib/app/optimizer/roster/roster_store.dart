@@ -29,6 +29,25 @@ class RosterStore {
 
   String _path(String profileName) => join(_dir, '$profileName.json');
 
+  // Stores just the active profile name so the app reopens on the right profile.
+  // Uses a leading underscore so it sorts before any profile and won't be
+  // mistaken for a profile (profiles only match *.json).
+  String get _activePath => join(_dir, '_active');
+
+  /// Returns the last active profile name, or null if none was recorded.
+  String? readLastProfile() {
+    final file = File(_activePath);
+    if (!file.existsSync()) return null;
+    final name = file.readAsStringSync().trim();
+    return name.isEmpty ? null : name;
+  }
+
+  /// Persists [name] as the active profile so it can be restored on next launch.
+  void writeLastProfile(String name) {
+    _ensureDir();
+    File(_activePath).writeAsStringSync(name);
+  }
+
   // -------------------------------------------------------------------------
   // Read
   // -------------------------------------------------------------------------

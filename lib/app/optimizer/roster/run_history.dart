@@ -15,7 +15,95 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:chaldea/models/userdata/battle.dart';
+import 'package:chaldea/models/models.dart';
+
+// ---------------------------------------------------------------------------
+// QuestFingerprint — wave/class/HP summary for cross-quest similarity matching
+// ---------------------------------------------------------------------------
+
+/// Compact descriptor of a quest's enemy composition.
+///
+/// Stored on every [RunRecord] so [PatternPass] can compare historical clears
+/// against new quests without needing the original [QuestPhase] on disk.
+/// Stages with no enemies (cutscene/transition stages) are excluded.
+class QuestFingerprint {
+  final int waveCount;
+
+  /// Sorted class IDs of enemies per wave (non-empty stages only).
+  final List<List<int>> classIdsPerWave;
+
+  /// Sum of all enemy HP per wave (non-empty stages only).
+  final List<int> totalHpPerWave;
+
+  const QuestFingerprint({
+    required this.waveCount,
+    required this.classIdsPerWave,
+    required this.totalHpPerWave,
+  });
+
+  factory QuestFingerprint.fromQuestPhase(QuestPhase quest) {
+    final classIdsPerWave = <List<int>>[];
+    final totalHpPerWave = <int>[];
+    for (final stage in quest.stages) {
+      if (stage.enemies.isEmpty) continue;
+      final classes = stage.enemies.map((e) => e.svt.classId).toList()..sort();
+      final totalHp = stage.enemies.fold(0, (sum, e) => sum + e.hp);
+      classIdsPerWave.add(classes);
+      totalHpPerWave.add(totalHp);
+    }
+    return QuestFingerprint(
+      waveCount: classIdsPerWave.length,
+      classIdsPerWave: classIdsPerWave,
+      totalHpPerWave: totalHpPerWave,
+    );
+  }
+
+  /// Returns a similarity score in [0.0, 1.0] between this fingerprint and
+  /// [other]. Wave count must match exactly; class and HP distributions are
+  /// compared per wave.
+  ///
+  /// Score = 0.6 × (average per-wave class Jaccard) + 0.4 × (average per-wave HP ratio).
+  double similarityTo(QuestFingerprint other) {
+    if (waveCount != other.waveCount || waveCount == 0) return 0.0;
+
+    double classScore = 0.0;
+    double hpScore = 0.0;
+
+    for (int i = 0; i < waveCount; i++) {
+      final a = classIdsPerWave[i].toSet();
+      final b = other.classIdsPerWave[i].toSet();
+      final intersection = a.intersection(b).length;
+      final union = a.union(b).length;
+      classScore += union > 0 ? intersection / union : 1.0;
+
+      final hpA = totalHpPerWave[i];
+      final hpB = other.totalHpPerWave[i];
+      if (hpA > 0 && hpB > 0) {
+        hpScore += hpA < hpB ? hpA / hpB : hpB / hpA;
+      } else if (hpA == 0 && hpB == 0) {
+        hpScore += 1.0;
+      }
+      // one side is 0 and the other isn't → hpScore += 0
+    }
+
+    return 0.6 * (classScore / waveCount) + 0.4 * (hpScore / waveCount);
+  }
+
+  Map<String, dynamic> toJson() => {
+        'waveCount': waveCount,
+        'classIdsPerWave': classIdsPerWave,
+        'totalHpPerWave': totalHpPerWave,
+      };
+
+  factory QuestFingerprint.fromJson(Map<String, dynamic> json) =>
+      QuestFingerprint(
+        waveCount: json['waveCount'] as int,
+        classIdsPerWave: (json['classIdsPerWave'] as List)
+            .map((w) => (w as List).cast<int>())
+            .toList(),
+        totalHpPerWave: (json['totalHpPerWave'] as List).cast<int>(),
+      );
+}
 
 /// A single optimizer run result: the spec that cleared, the turn count,
 /// which quest it cleared, and when it was found.
@@ -31,6 +119,20 @@ class RunRecord {
   /// false → only confirmed at max damage; may fail on bad RNG.
   final bool clearsAtMinDamage;
 
+  /// Quest composition fingerprint — used by PatternPass to match this clear
+  /// against future quests with similar enemy structure. Null on old records
+  /// written before fingerprinting was introduced (those records are skipped
+  /// by PatternPass).
+  final QuestFingerprint? questFingerprint;
+
+  /// The optimizer pass that found this clear (e.g. 'Shared', 'Pattern',
+  /// 'Rules'). Null on records written before pass attribution was added.
+  final String? passName;
+
+  /// For PatternPass clears: the source quest ID from whose history this team
+  /// was drawn. Null for all other passes.
+  final int? sourceQuestId;
+
   RunRecord({
     required this.timestamp,
     required this.questId,
@@ -38,7 +140,39 @@ class RunRecord {
     required this.totalTurns,
     required this.battleData,
     this.clearsAtMinDamage = false,
+    this.questFingerprint,
+    this.passName,
+    this.sourceQuestId,
   });
+
+  /// Returns a copy of this record with [fp] stamped in.
+  /// Used by the engine to set the fingerprint on records returned from workers.
+  RunRecord withFingerprint(QuestFingerprint fp) => RunRecord(
+        timestamp: timestamp,
+        questId: questId,
+        questPhase: questPhase,
+        totalTurns: totalTurns,
+        clearsAtMinDamage: clearsAtMinDamage,
+        battleData: battleData,
+        questFingerprint: fp,
+        passName: passName,
+        sourceQuestId: sourceQuestId,
+      );
+
+  /// Returns a copy of this record with pass attribution stamped in.
+  /// [pass] is the name of the optimizer pass (e.g. 'Pattern', 'Rules').
+  /// [source] is the source quest ID for PatternPass clears; null for others.
+  RunRecord withPassAttribution(String pass, int? source) => RunRecord(
+        timestamp: timestamp,
+        questId: questId,
+        questPhase: questPhase,
+        totalTurns: totalTurns,
+        clearsAtMinDamage: clearsAtMinDamage,
+        battleData: battleData,
+        questFingerprint: questFingerprint,
+        passName: pass,
+        sourceQuestId: source,
+      );
 
   /// Number of skill button presses in the action log.
   /// Used for sorting results by least button presses.
@@ -53,6 +187,9 @@ class RunRecord {
         'totalTurns': totalTurns,
         'clearsAtMinDamage': clearsAtMinDamage,
         'battleData': battleData.toJson(),
+        if (questFingerprint != null) 'questFingerprint': questFingerprint!.toJson(),
+        if (passName != null) 'passName': passName,
+        if (sourceQuestId != null) 'sourceQuestId': sourceQuestId,
       };
 
   factory RunRecord.fromJson(Map<String, dynamic> json) => RunRecord(
@@ -63,6 +200,12 @@ class RunRecord {
         clearsAtMinDamage: json['clearsAtMinDamage'] as bool? ?? false,
         battleData:
             BattleShareData.fromJson(json['battleData'] as Map<String, dynamic>),
+        questFingerprint: json['questFingerprint'] != null
+            ? QuestFingerprint.fromJson(
+                json['questFingerprint'] as Map<String, dynamic>)
+            : null,
+        passName: json['passName'] as String?,
+        sourceQuestId: json['sourceQuestId'] as int?,
       );
 }
 

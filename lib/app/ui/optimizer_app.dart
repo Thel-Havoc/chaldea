@@ -97,9 +97,21 @@ class _LoadingGateState extends State<_LoadingGate> {
       db.gameData = data;
       _rosterNotifier = RosterNotifier(db.paths.appPath);
       setState(() => _loaded = true);
+      // After showing the UI, silently check for updated game data in the background.
+      _checkForGameDataUpdate();
     } catch (e, st) {
       logger.e('OptimizerApp: game data load failed', e, st);
       if (mounted) setState(() => _error = e.toString());
+    }
+  }
+
+  /// Checks for updated game data online. If new data is available, updates
+  /// [db.gameData] and rebuilds. Silent — never shows an error to the user.
+  /// Called automatically after startup and can be triggered manually.
+  Future<void> _checkForGameDataUpdate() async {
+    final updated = await GameDataLoader.instance.reload(offline: false, silent: true);
+    if (updated != null && mounted) {
+      setState(() => db.gameData = updated);
     }
   }
 

@@ -18,7 +18,12 @@ class RosterNotifier extends ChangeNotifier {
   late UserRoster _roster;
 
   RosterNotifier(String appPath) : _store = RosterStore(appPath) {
-    _roster = _store.loadProfile(_defaultProfile) ?? _store.createProfile(_defaultProfile);
+    final lastName = _store.readLastProfile();
+    final profiles = _store.listProfiles();
+    final toLoad = (lastName != null && profiles.contains(lastName))
+        ? lastName
+        : _defaultProfile;
+    _roster = _store.loadProfile(toLoad) ?? _store.createProfile(_defaultProfile);
   }
 
   UserRoster get roster => _roster;
@@ -36,22 +41,19 @@ class RosterNotifier extends ChangeNotifier {
   /// Loads and activates a different profile. No-op if already active.
   void switchProfile(String name) {
     if (name == _roster.profileName) return;
-    _roster = _store.loadProfile(name) ?? _roster;
-    notifyListeners();
+    _setActive(_store.loadProfile(name) ?? _roster);
   }
 
   /// Creates a new empty profile, switches to it, and saves it.
   /// Throws [ArgumentError] if a profile with that name already exists.
   void createNewProfile(String name) {
-    _roster = _store.createProfile(name);
-    notifyListeners();
+    _setActive(_store.createProfile(name));
   }
 
   /// Renames the active profile.
   /// Throws [ArgumentError] if a profile with [newName] already exists.
   void renameCurrentProfile(String newName) {
-    _roster = _store.renameProfile(_roster, newName);
-    notifyListeners();
+    _setActive(_store.renameProfile(_roster, newName));
   }
 
   /// Deletes the active profile and switches to the next available one.
@@ -60,13 +62,11 @@ class RosterNotifier extends ChangeNotifier {
     final toDelete = _roster.profileName;
     final remaining = _store.listProfiles()..remove(toDelete);
     _store.deleteProfile(toDelete);
-    if (remaining.isEmpty) {
-      _roster = _store.createProfile(_defaultProfile);
-    } else {
-      _roster = _store.loadProfile(remaining.first) ??
-          UserRoster(profileName: remaining.first);
-    }
-    notifyListeners();
+    final next = remaining.isEmpty
+        ? _store.createProfile(_defaultProfile)
+        : (_store.loadProfile(remaining.first) ??
+            UserRoster(profileName: remaining.first));
+    _setActive(next);
   }
 
   /// Writes the active profile as JSON to [targetPath].
@@ -79,7 +79,13 @@ class RosterNotifier extends ChangeNotifier {
   /// any name collision (overwrite or rename).
   void saveImported(UserRoster imported) {
     _store.saveProfile(imported);
-    _roster = imported;
+    _setActive(imported);
+  }
+
+  /// Sets the active roster, persists the active profile name, and notifies.
+  void _setActive(UserRoster roster) {
+    _roster = roster;
+    _store.writeLastProfile(roster.profileName);
     notifyListeners();
   }
 

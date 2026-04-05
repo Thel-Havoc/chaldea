@@ -38,7 +38,7 @@ class _CePickerPageState extends State<CePickerPage> {
         .where((ce) => _rarityFilter == null || ce.rarity == _rarityFilter)
         .where((ce) => q.isEmpty || ce.lName.l.toLowerCase().contains(q))
         .toList()
-      ..sort((a, b) => a.collectionNo.compareTo(b.collectionNo));
+      ..sort((a, b) => b.collectionNo.compareTo(a.collectionNo));
   }
 
   @override

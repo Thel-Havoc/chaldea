@@ -10,12 +10,121 @@ import 'dart:io' show Platform, ProcessInfo;
 import 'package:flutter/widgets.dart';
 
 import 'package:chaldea/app/api/atlas.dart';
+import 'package:chaldea/app/api/chaldea.dart';
 import 'package:chaldea/models/models.dart';
 import 'package:chaldea/packages/logger.dart';
 
 import '../../optimizer/engine_runner.dart';
 import '../../optimizer/roster/run_history.dart';
 import '../../optimizer/roster/user_roster.dart';
+
+// ---------------------------------------------------------------------------
+// Brute Force pass report data class
+// ---------------------------------------------------------------------------
+
+class BruteForceReport {
+  final int total;         // candidates after gate1/gate2
+  final int gate1Blocked;
+  final int gate2Blocked;
+  final int dedupSigHits;  // skipped: full-team sig already dispatched
+  final int dedupSvtHits;  // skipped: servant-set already cleared
+  final int dispatched;    // actually simulated (or would-simulate in dry run)
+  final int clears;
+  final bool isDryRun;
+
+  const BruteForceReport({
+    required this.total,
+    required this.gate1Blocked,
+    required this.gate2Blocked,
+    required this.dedupSigHits,
+    required this.dedupSvtHits,
+    required this.dispatched,
+    required this.clears,
+    required this.isDryRun,
+  });
+
+  factory BruteForceReport.fromMap(Map<String, dynamic> m) => BruteForceReport(
+        total: m['total'] as int,
+        gate1Blocked: m['gate1Blocked'] as int,
+        gate2Blocked: m['gate2Blocked'] as int,
+        dedupSigHits: m['dedupSigHits'] as int,
+        dedupSvtHits: m['dedupSvtHits'] as int,
+        dispatched: m['dispatched'] as int,
+        clears: m['clears'] as int,
+        isDryRun: m['isDryRun'] as bool,
+      );
+}
+
+// ---------------------------------------------------------------------------
+// Shared Pass report data class
+// ---------------------------------------------------------------------------
+
+class SharedTriedTeam {
+  final int supportId;
+  final List<int> playerIds;
+  final int? mcId;
+  final bool cleared;
+
+  const SharedTriedTeam({
+    required this.supportId,
+    required this.playerIds,
+    this.mcId,
+    required this.cleared,
+  });
+
+  factory SharedTriedTeam.fromMap(Map<String, dynamic> m) => SharedTriedTeam(
+        supportId: m['supportId'] as int,
+        playerIds: (m['playerIds'] as List).cast<int>(),
+        mcId: m['mcId'] as int?,
+        cleared: m['cleared'] as bool,
+      );
+}
+
+// ---------------------------------------------------------------------------
+// Pattern Pass report data classes
+// ---------------------------------------------------------------------------
+
+class PatternQuestMatch {
+  final int sourceQuestId;
+  final double score;
+  final List<TriedTeam> triedTeams;
+
+  const PatternQuestMatch({
+    required this.sourceQuestId,
+    required this.score,
+    required this.triedTeams,
+  });
+
+  factory PatternQuestMatch.fromMap(Map<String, dynamic> m) => PatternQuestMatch(
+        sourceQuestId: m['sourceQuestId'] as int,
+        score: (m['score'] as num).toDouble(),
+        triedTeams: (m['teams'] as List)
+            .map((t) => TriedTeam.fromMap(Map<String, dynamic>.from(t as Map)))
+            .toList(),
+      );
+}
+
+class TriedTeam {
+  final int supportId;
+  final List<int> playerIds;
+  final int? mcId;
+
+  const TriedTeam({
+    required this.supportId,
+    required this.playerIds,
+    this.mcId,
+  });
+
+  factory TriedTeam.fromMap(Map<String, dynamic> m) => TriedTeam(
+        supportId: m['supportId'] as int,
+        playerIds: (m['playerIds'] as List).cast<int>(),
+        mcId: m['mcId'] as int?,
+      );
+}
+
+// ---------------------------------------------------------------------------
+// RunNotifier
+// ---------------------------------------------------------------------------
 
 class RunNotifier extends ChangeNotifier {
   NiceWar? selectedWar;
@@ -56,6 +165,17 @@ class RunNotifier extends ChangeNotifier {
   int plugSuitSpecsGenerated = 0;
   int plugSuitSpecsChecked = 0;
 
+  /// Shared Pass report — populated once after the Shared Pass completes.
+  int sharedPassFetched = 0;  // community teams returned by the API
+  int sharedPassSkipped = 0;  // teams the player can't field
+  List<SharedTriedTeam> sharedPassTeams = [];
+
+  /// Pattern Pass report — populated once after the Pattern Pass completes.
+  List<PatternQuestMatch> patternPassMatches = [];
+
+  /// Brute Force pass report — populated once after BruteForce completes (or dry-run).
+  BruteForceReport? bruteForceReport;
+
   // Diagnostic: root-isolate responsiveness during runs.
   // These measure whether the root-isolate event loop processes engine messages
   // at a steady rate or only in a burst at the end (indicating a blockage).
@@ -88,6 +208,32 @@ class RunNotifier extends ChangeNotifier {
 
   void setWorkerCount(int count) {
     workerCount = count.clamp(1, Platform.numberOfProcessors);
+    notifyListeners();
+  }
+
+  /// Per-pass enable toggles — for testing only. Disabling a pass skips it
+  /// entirely, which breaks cross-pass dedup but is fine for isolated testing.
+  bool enableSharedPass = true;
+  bool enablePatternPass = true;
+  bool enableRulesPass = true;
+  bool enableBruteForcePass = false;
+
+  /// When true, BruteForce enumerates candidates and counts dedup hits but
+  /// does not simulate anything. Implies enableBruteForcePass = true.
+  bool dryRunBruteForce = true;
+
+  void setDryRunBruteForce(bool value) {
+    dryRunBruteForce = value;
+    notifyListeners();
+  }
+
+  void setPassEnabled(String pass, bool enabled) {
+    switch (pass) {
+      case 'shared':      enableSharedPass      = enabled;
+      case 'pattern':     enablePatternPass      = enabled;
+      case 'rules':       enableRulesPass        = enabled;
+      case 'bruteForce':  enableBruteForcePass   = enabled;
+    }
     notifyListeners();
   }
 
@@ -188,6 +334,11 @@ class RunNotifier extends ChangeNotifier {
     plugSuitCandidates = 0;
     plugSuitSpecsGenerated = 0;
     plugSuitSpecsChecked = 0;
+    sharedPassFetched = 0;
+    sharedPassSkipped = 0;
+    sharedPassTeams = [];
+    patternPassMatches = [];
+    bruteForceReport = null;
     progressMsgsReceived = 0;
     maxProgressIntervalMs = 0;
     maxProgressIntervalIndex = 0;
@@ -222,10 +373,21 @@ class RunNotifier extends ChangeNotifier {
     final historyFile =
         '${db.paths.appPath}/optimizer_history_${selectedQuest!.id}.jsonl';
 
+    // Fetch community teams for SharedPass while workers are warming up.
+    // Network failures are silently swallowed — SharedPass simply runs empty.
+    final communityTeams = await _fetchCommunityTeams(questPhase);
+
     _runner = EngineRunner(
       quest: questPhase,
       roster: roster,
+      appPath: db.paths.appPath,
+      communityTeams: communityTeams,
       workerCount: workerCount,
+      enableSharedPass: enableSharedPass,
+      enablePatternPass: enablePatternPass,
+      enableRulesPass: enableRulesPass,
+      enableBruteForcePass: enableBruteForcePass,
+      dryRunBruteForce: dryRunBruteForce,
       historyFile: historyFile,
       onProgress: (checked, _, engineMs) {
         specsChecked = checked;
@@ -303,6 +465,21 @@ class RunNotifier extends ChangeNotifier {
         runElapsedAtDone = _runWatch.elapsed;
         rssAtDoneMb = ProcessInfo.currentRss ~/ (1024 * 1024);
       },
+      onSharedPassReport: (fetched, skipped, teams) {
+        sharedPassFetched = fetched;
+        sharedPassSkipped = skipped;
+        sharedPassTeams = teams.map(SharedTriedTeam.fromMap).toList();
+        notifyListeners();
+      },
+      onPatternPassReport: (matches) {
+        patternPassMatches =
+            matches.map(PatternQuestMatch.fromMap).toList();
+        notifyListeners();
+      },
+      onBruteForceReport: (report) {
+        bruteForceReport = BruteForceReport.fromMap(report);
+        notifyListeners();
+      },
     );
 
     try {
@@ -314,6 +491,29 @@ class RunNotifier extends ChangeNotifier {
       _runWatch.stop();
       isRunning = false;
       notifyListeners(); // flush final state
+    }
+  }
+
+  /// Fetches community-shared team compositions for [quest] from the Chaldea
+  /// simulator API. Returns encoded [BattleShareData] strings for SharedPass.
+  /// Returns an empty list on any network or parse error.
+  Future<List<String>> _fetchCommunityTeams(QuestPhase quest) async {
+    try {
+      final result = await ChaldeaWorkerApi.teamsByQuest(
+        questId: quest.id,
+        phase: quest.phase,
+        enemyHash: quest.enemyHash,
+        limit: 200,
+      );
+      if (result == null) return const [];
+      final teams = <String>[];
+      for (final team in result.data) {
+        final shareData = team.parse();
+        if (shareData != null) teams.add(shareData.toDataV2());
+      }
+      return teams;
+    } catch (e) {
+      return const [];
     }
   }
 
